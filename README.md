@@ -4,7 +4,7 @@
 
 - 后端：Python 3 单文件，只用标准库，数据存 SQLite
 - 前端：Vue 3 + TypeScript，构建产物由后端直接托管
-- 只收信，不发信
+- 收信由自带的 SMTP 服务完成；发信可选，通过 [Resend](https://resend.com) 的接口转发
 
 ## 功能
 
@@ -14,7 +14,8 @@
 - **业务场景**：按场景生成邮箱，每个场景可以关联一组域名和一个邮件模板
 - **邮件模板**：用占位符或正则定义验证码的提取方式，支持字母数字混合等任意格式，可在线测试
 - **域名管理**：在看板里增删、启用、停用域名，立即生效，并可检测 MX 记录是否指向本机
-- **自动清理**：邮件默认保留 24 小时
+- **发送邮件**：配置 Resend 后，可以用已添加域名下的任意地址作为发件人发信，并保留发件记录
+- **自动清理**：收到和发出的邮件默认保留 24 小时
 
 ## 快速开始
 
@@ -78,6 +79,7 @@ MAIL_DOMAINS=a.com,b.com API_KEY=你的密钥 python3 server.py
 | `DATA_DIR` | `backend/data` | 数据库和密钥文件所在目录 |
 | `STATIC_DIR` | `frontend/dist` | 看板静态文件目录 |
 | `RETENTION_HOURS` | `24` | 邮件保留时长（小时） |
+| `RESEND_API_KEY` | 空 | Resend 的 API Key。留空则不启用发信 |
 | `MAX_MAIL_BYTES` | `2097152` | 单封邮件大小上限，超过则拒收 |
 
 Docker 方式下，`.env` 里的 `SMTP_PORT` 和 `HTTP_PORT` 指的是宿主机端口。
@@ -199,6 +201,33 @@ result = requests.get(f"{BASE}/api/code", params={"address": address, "wait": 60
 print(result["code"])
 ```
 
+### 发送邮件
+
+需要先配置 `RESEND_API_KEY`，并在 Resend 里验证发信域名（按它给出的清单添加 SPF、DKIM 等 DNS 记录）。发信走 HTTPS，不受云厂商封锁出站 25 端口的影响。
+
+`POST /api/send`
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `from` | 是 | 发件地址，域名必须是已添加的域名 |
+| `from_name` | 否 | 发件人显示名称 |
+| `to` | 是 | 收件地址，字符串（逗号分隔）或数组，最多 20 个 |
+| `subject` | 是 | 主题 |
+| `text` | `text` 和 `html` 至少一项 | 纯文本正文 |
+| `html` | 同上 | HTML 正文 |
+
+```bash
+curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"from":"hello@a.com","to":"someone@example.com","subject":"Hi","text":"Hello"}' \
+  http://127.0.0.1:8080/api/send
+```
+
+成功返回 `{"id": 1, "provider_id": "Resend 返回的邮件 ID"}`。Resend 拒绝或连接失败时返回 `502` 和错误原因，这次尝试也会记入发件记录。
+
+`GET /api/sent`（参数 `limit`，默认 50，上限 200）返回 `{"configured": 是否已配置发信, "mails": [...]}`。每条记录含 `id`、`from`、`to`、`subject`、`body`、`status`（`sent` 或 `failed`）、`error`、`created_at`。
+
+`sent` 表示 Resend 已接受这封邮件，不代表已送达收件人。
+
 ### 邮箱与邮件
 
 | 方法 | 路径 | 参数 | 返回 |
@@ -312,7 +341,7 @@ start.sh / stop.sh       启停脚本
 
 ## 限制
 
-- 只收信，不能发信。
+- 发信依赖 Resend，受其额度和使用政策约束；不支持附件。
 - 不支持 STARTTLS，发件方以明文投递。
 - 接口和看板是明文 HTTP，API Key 会在网络上明文传输；对公网开放时建议在前面加一层 HTTPS 反向代理。
 - 单封邮件最多 20 个收件人；邮件只保存纯文本正文，不保存附件。

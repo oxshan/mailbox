@@ -10,6 +10,7 @@ import unittest
 import urllib.error
 import urllib.request
 from email.message import EmailMessage
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import server
 from server import (
@@ -271,6 +272,60 @@ class EndToEndTest(unittest.TestCase):
         finally:
             server.resolve_mx = original
         self.assertEqual(self.api_error("/api/domains/check", method="POST", body={"name": "nope.test"})[0], 404)
+
+    def test_send_mail(self):
+        calls = []
+
+        class FakeResend(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                calls.append((self.headers["Authorization"], self.headers["User-Agent"], body))
+                failed = body["subject"] == "reject"
+                reply = json.dumps({"message": "domain is not verified"} if failed else {"id": "re_123"}).encode()
+                self.send_response(403 if failed else 200)
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+        mail = {"from": "Hello@A.test", "from_name": "客服", "to": "x@example.com, y@example.com", "subject": "Hi", "text": "body"}
+        self.assertFalse(self.api("/api/sent")["configured"])
+        self.assertIn("RESEND_API_KEY", self.api_error("/api/send", method="POST", body=mail)[1])
+
+        fake = ThreadingHTTPServer(("127.0.0.1", 0), FakeResend)
+        threading.Thread(target=fake.serve_forever, daemon=True).start()
+        cfg = self.app.cfg
+        cfg.resend_api_key, cfg.resend_api_url = "re_test", "http://127.0.0.1:%d/emails" % fake.server_address[1]
+        try:
+            self.assertEqual(self.api("/api/send", method="POST", body=mail)["provider_id"], "re_123")
+            auth, agent, sent = calls[-1]
+            self.assertEqual((auth, agent), ("Bearer re_test", "mailbox/1.0"))
+            self.assertEqual(sent["from"], '"客服" <hello@a.test>')
+            self.assertEqual(sent["to"], ["x@example.com", "y@example.com"])
+            self.assertEqual((sent["subject"], sent["text"]), ("Hi", "body"))
+
+            code, message = self.api_error("/api/send", method="POST", body=dict(mail, subject="reject"))
+            self.assertEqual(code, 502)
+            self.assertIn("domain is not verified", message)
+
+            for bad in ({"from": "a@evil.test"}, {"to": "not-an-address"}, {"to": ""}, {"subject": " "}, {"text": ""}):
+                self.assertEqual(self.api_error("/api/send", method="POST", body=dict(mail, **bad))[0], 400, bad)
+            self.assertEqual(len(calls), 2)
+
+            listed = self.api("/api/sent")
+            self.assertTrue(listed["configured"])
+            self.assertEqual([(m["status"], m["subject"]) for m in listed["mails"]], [("failed", "reject"), ("sent", "Hi")])
+            self.assertEqual(listed["mails"][1]["to"], "x@example.com, y@example.com")
+            self.assertIn("domain is not verified", listed["mails"][0]["error"])
+
+            cfg.resend_api_url = "http://127.0.0.1:1/emails"
+            self.assertEqual(self.api_error("/api/send", method="POST", body=mail)[0], 502)
+        finally:
+            cfg.resend_api_key = ""
+            fake.shutdown()
+            fake.server_close()
 
     def test_template_test_endpoint(self):
         body = {"mode": "placeholder", "pattern": "验证码：{code}，{*}有效", "sample": "您的验证码：X9K2P，10 分钟内有效"}

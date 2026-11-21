@@ -15,6 +15,8 @@ import string
 import struct
 import threading
 import time
+import urllib.error
+import urllib.request
 from email import message_from_bytes, policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -37,6 +39,8 @@ class Config:
         self.retention_hours = float(env("RETENTION_HOURS", "24"))
         self.max_mail_bytes = int(env("MAX_MAIL_BYTES", str(2 * 1024 * 1024)))
         self.mx_check_port = 25
+        self.resend_api_key = env("RESEND_API_KEY", "")
+        self.resend_api_url = env("RESEND_API_URL", "https://api.resend.com/emails")
         for key, value in overrides.items():
             setattr(self, key, value)
 
@@ -229,6 +233,35 @@ def check_domain(name, instance_id, port=25, timeout=5):
     return {"status": "mismatch", "message": "MX 指向 %s，但那是另一台邮件服务器" % host, "mx": mx}
 
 
+class SendError(Exception):
+    pass
+
+
+def send_via_resend(cfg, payload):
+    """Send one mail through the Resend HTTPS API and return its id."""
+    request = urllib.request.Request(
+        cfg.resend_api_url,
+        data=json.dumps(payload).encode(),
+        method="POST",
+        headers={
+            "Authorization": "Bearer " + cfg.resend_api_key,
+            "Content-Type": "application/json",
+            "User-Agent": "mailbox/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return str(json.loads(response.read()).get("id", ""))
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read()).get("message")
+        except (ValueError, AttributeError):
+            detail = None
+        raise SendError("Resend 返回 %d：%s" % (exc.code, detail or exc.reason))
+    except (OSError, ValueError) as exc:
+        raise SendError("无法连接 Resend：%s" % exc)
+
+
 class Store:
     def __init__(self, path, seed_domains=()):
         self.lock = threading.Lock()
@@ -254,6 +287,10 @@ class Store:
                 note TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS scenario_domains (
                 scenario_id INTEGER NOT NULL, domain_id INTEGER NOT NULL, PRIMARY KEY (scenario_id, domain_id));
+            CREATE TABLE IF NOT EXISTS sent_mails (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipients TEXT NOT NULL,
+                subject TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '',
+                provider_id TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL);
             """
         )
         self.add_column("mailboxes", "scenario_id", "INTEGER")
@@ -364,6 +401,7 @@ class Store:
     def purge(self, max_age_seconds):
         cutoff = time.time() - max_age_seconds
         self.execute("DELETE FROM mails WHERE received_at < ?", (cutoff,))
+        self.execute("DELETE FROM sent_mails WHERE created_at < ?", (cutoff,))
         self.execute(
             "DELETE FROM mailboxes WHERE created_at < ?"
             " AND address NOT IN (SELECT DISTINCT address FROM mails)",
@@ -372,6 +410,7 @@ class Store:
 
 
 _ADDRESS = re.compile(r"<([^<>]*)>")
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 _DOMAIN = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]")
 
 
@@ -763,6 +802,55 @@ class ApiHandler(BaseHTTPRequestHandler):
         else:
             rows = self.app.store.query(sql + " ORDER BY id DESC LIMIT ?", (limit,))
         self.send_json(200, {"mails": rows})
+
+    def get_sent(self, params, item=None):
+        limit = min(max(int(params.get("limit", 50)), 1), 200)
+        rows = self.app.store.query(
+            "SELECT id, sender AS 'from', recipients AS 'to', subject, body, status, error, created_at"
+            " FROM sent_mails ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        self.send_json(200, {"configured": bool(self.app.cfg.resend_api_key), "mails": rows})
+
+    def post_send(self, params, item=None):
+        cfg, store = self.app.cfg, self.app.store
+        if not cfg.resend_api_key:
+            raise ValueError("发信未配置：请设置环境变量 RESEND_API_KEY")
+        sender = str(params.get("from", "")).strip().lower()
+        name = re.sub(r'[\r\n"<>]', "", str(params.get("from_name", ""))).strip()
+        to = params.get("to", "")
+        recipients = to if isinstance(to, list) else re.split(r"[,;\s]+", str(to))
+        recipients = [str(value).strip() for value in recipients if str(value).strip()]
+        subject = re.sub(r"[\r\n]+", " ", str(params.get("subject", ""))).strip()
+        text, rich = str(params.get("text", "")), str(params.get("html", ""))
+        if not _EMAIL.fullmatch(sender) or sender.rpartition("@")[2] not in store.domain_names():
+            raise ValueError("发件地址必须是已添加域名下的邮箱：%s" % sender)
+        if not recipients or len(recipients) > 20:
+            raise ValueError("收件人数量必须在 1 到 20 之间")
+        for address in recipients:
+            if not _EMAIL.fullmatch(address):
+                raise ValueError("收件地址格式不正确：%s" % address)
+        if not subject:
+            raise ValueError("主题不能为空")
+        if not text.strip() and not rich.strip():
+            raise ValueError("正文不能为空")
+        payload = {"from": '"%s" <%s>' % (name, sender) if name else sender, "to": recipients, "subject": subject}
+        if text.strip():
+            payload["text"] = text
+        if rich.strip():
+            payload["html"] = rich
+        row = (sender, ", ".join(recipients), subject, text or html_to_text(rich))
+        sql = (
+            "INSERT INTO sent_mails (sender, recipients, subject, body, status, error, provider_id, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        try:
+            provider_id = send_via_resend(cfg, payload)
+        except SendError as exc:
+            store.insert(sql, row + ("failed", str(exc), "", time.time()))
+            return self.send_json(502, {"error": str(exc)})
+        new_id = store.insert(sql, row + ("sent", "", provider_id, time.time()))
+        self.send_json(200, {"id": new_id, "provider_id": provider_id})
 
     def api_stats(self, params, item=None):
         day_ago = time.time() - 86400

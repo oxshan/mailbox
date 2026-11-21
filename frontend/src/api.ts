@@ -72,6 +72,25 @@ export interface DomainCheck {
   mx: string[]
 }
 
+export interface SendInput {
+  from: string
+  from_name: string
+  to: string
+  subject: string
+  text: string
+}
+
+export interface SentMail {
+  id: number
+  from: string
+  to: string
+  subject: string
+  body: string
+  status: 'sent' | 'failed'
+  error: string
+  created_at: number
+}
+
 export class UnauthorizedError extends Error {}
 
 const KEY_STORAGE = 'mailbox_api_key'
@@ -113,6 +132,9 @@ export const api = {
     request<{ mails: Mail[] }>('mails', { params: address ? { address } : {} }).then((r) => r.mails),
   createMailbox: (scenario: string) =>
     request<{ address: string; domain: string; scenario: string }>('mailbox', { method: 'POST', params: { scenario } }),
+
+  sent: () => request<{ configured: boolean; mails: SentMail[] }>('sent'),
+  send: (input: SendInput) => request<{ id: number }>('send', { method: 'POST', body: input }),
 
   scenarios: () => request<{ scenarios: Scenario[] }>('scenarios').then((r) => r.scenarios),
   saveScenario: (input: ScenarioInput, id?: number) =>

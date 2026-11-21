@@ -1021,6 +1021,58 @@ input:disabled {
   margin-left: auto;
 }
 
+.notice {
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.notice code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--border);
+}
+
+.addr {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.addr input,
+.addr select {
+  flex: 1;
+  min-width: 0;
+}
+
+textarea.prose {
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.table tr.clickable {
+  cursor: pointer;
+}
+
+.table tr.detail td {
+  height: auto;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  white-space: normal;
+}
+
+.table tr.detail .body {
+  margin: 0;
+}
+
+.table tr.detail .error {
+  margin-bottom: 8px;
+}
+
 .chip.off {
   opacity: 0.55;
   text-decoration: line-through;
