@@ -16,6 +16,7 @@ export interface Mail {
   body: string
   code: string | null
   received_at: number
+  read: boolean
 }
 
 export interface Stats {
@@ -130,6 +131,7 @@ export const api = {
   mailboxes: () => request<{ mailboxes: Mailbox[] }>('mailboxes').then((r) => r.mailboxes),
   mails: (address: string) =>
     request<{ mails: Mail[] }>('mails', { params: address ? { address } : {} }).then((r) => r.mails),
+  markRead: (id: number) => request<{ id: number }>(`read/${id}`, { method: 'POST' }),
   createMailbox: (scenario: string) =>
     request<{ address: string; domain: string; scenario: string }>('mailbox', { method: 'POST', params: { scenario } }),
 

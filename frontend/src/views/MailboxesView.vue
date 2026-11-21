@@ -5,7 +5,6 @@ import Icon from '../Icon.vue'
 import { copy, fail, formatTime } from '../ui'
 
 const REFRESH_MS = 5000
-const FRESH_SECONDS = 60
 
 const stats = ref<Stats | null>(null)
 const scenarios = ref<Scenario[]>([])
@@ -18,7 +17,6 @@ const filter = ref('')
 const scenario = ref('default')
 const creating = ref(false)
 const refreshing = ref(false)
-const now = ref(Date.now())
 
 let timer: number | undefined
 
@@ -48,7 +46,6 @@ async function refresh() {
     stats.value = nextStats
     mailboxes.value = nextBoxes
     mails.value = nextMails
-    now.value = Date.now()
   } catch (err) {
     fail(err, '刷新失败')
   } finally {
@@ -70,7 +67,27 @@ async function createMailbox() {
   }
 }
 
-const isFresh = (seconds: number) => now.value / 1000 - seconds < FRESH_SECONDS
+async function markRead(mail: Mail) {
+  if (mail.read) return
+  mail.read = true
+  try {
+    await api.markRead(mail.id)
+  } catch (err) {
+    mail.read = false
+    fail(err, '标记已读失败')
+  }
+}
+
+function toggle(mail: Mail) {
+  expanded.value = expanded.value === mail.id ? null : mail.id
+  markRead(mail)
+}
+
+function copyCode(mail: Mail) {
+  if (!mail.code) return
+  copy(mail.code, `已复制验证码 ${mail.code}`)
+  markRead(mail)
+}
 
 watch(selected, () => {
   expanded.value = null
@@ -168,7 +185,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
         <span class="count">{{ mails.length }} 封</span>
       </div>
       <ul v-if="mails.length" class="list">
-        <li v-for="mail in mails" :key="mail.id" class="mail" :class="{ open: expanded === mail.id }">
+        <li v-for="mail in mails" :key="mail.id" class="mail" :class="{ open: expanded === mail.id, read: mail.read }">
           <div class="mail-row">
             <button
               v-if="mail.code"
@@ -176,7 +193,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
               type="button"
               :title="`点击复制 ${mail.code}`"
               :aria-label="`复制验证码 ${mail.code}`"
-              @click="copy(mail.code, `已复制验证码 ${mail.code}`)"
+              @click="copyCode(mail)"
             >
               {{ mail.code }}
             </button>
@@ -185,10 +202,10 @@ onBeforeUnmount(() => window.clearInterval(timer))
               class="mail-main"
               type="button"
               :aria-expanded="expanded === mail.id"
-              @click="expanded = expanded === mail.id ? null : mail.id"
+              @click="toggle(mail)"
             >
               <span class="subject">
-                <span v-if="isFresh(mail.received_at)" class="fresh">新</span>{{ mail.subject || '(无主题)' }}
+                <span v-if="!mail.read" class="fresh">新</span>{{ mail.subject || '(无主题)' }}
               </span>
               <span class="meta">
                 {{ mail.from }}<template v-if="!selected"> → {{ mail.address }}</template>

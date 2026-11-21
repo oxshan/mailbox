@@ -389,6 +389,19 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(boxes[address]["mail_count"], 2)
         self.assertGreaterEqual(self.api("/api/stats")["codes"], 2)
 
+    def test_mark_mail_read(self):
+        address = self.api("/api/mailbox?domain=a.test")["address"]
+        self.send(address, "First", "code 100001")
+        self.send(address, "Second", "code 100002")
+        second, first = self.api("/api/mails?address=" + address)["mails"]
+        self.assertEqual((first["read"], second["read"]), (False, False))
+        self.assertEqual(self.api("/api/read/%d" % first["id"], method="POST"), {"id": first["id"], "read": True})
+        self.api("/api/read/%d" % first["id"], method="POST")
+        second, first = self.api("/api/mails?address=" + address)["mails"]
+        self.assertEqual((first["read"], second["read"]), (True, False))
+        self.assertEqual(self.api("/api/code?address=" + address)["code"], "100002")
+        self.assertEqual(self.api_error("/api/read/99999999", method="POST")[0], 404)
+
     def test_since_filters_old_codes(self):
         address = self.api("/api/mailbox?domain=a.test")["address"]
         self.send(address, "Code", "code 111222")

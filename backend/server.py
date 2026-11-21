@@ -331,6 +331,7 @@ class Store:
         self.add_column("mails", "alt", "TEXT NOT NULL DEFAULT ''")
         for table in ("mailboxes", "mails", "sent_mails"):
             self.add_column(table, "deleted_at", "REAL")
+        self.add_column("mails", "read_at", "REAL")
         self.execute(
             "INSERT OR IGNORE INTO scenarios (key, name, created_at) VALUES (?, '默认场景', ?)",
             (DEFAULT_SCENARIO, time.time()),
@@ -842,14 +843,23 @@ class ApiHandler(BaseHTTPRequestHandler):
         address = str(params.get("address", "")).strip().lower()
         limit = min(max(int(params.get("limit", 50)), 1), 200)
         sql = (
-            "SELECT id, address, sender AS 'from', subject, body, code, received_at FROM mails"
-            " WHERE deleted_at IS NULL"
+            "SELECT id, address, sender AS 'from', subject, body, code, received_at, read_at IS NOT NULL AS read"
+            " FROM mails WHERE deleted_at IS NULL"
         )
         if address:
             rows = self.app.store.query(sql + " AND address = ? ORDER BY id DESC LIMIT ?", (address, limit))
         else:
             rows = self.app.store.query(sql + " ORDER BY id DESC LIMIT ?", (limit,))
+        for row in rows:
+            row["read"] = bool(row["read"])
         self.send_json(200, {"mails": rows})
+
+    def post_read(self, params, item=None):
+        store, mail_id = self.app.store, int(item or 0)
+        if not store.query("SELECT id FROM mails WHERE id = ? AND deleted_at IS NULL", (mail_id,)):
+            raise LookupError(item)
+        store.execute("UPDATE mails SET read_at = ? WHERE id = ? AND read_at IS NULL", (time.time(), mail_id))
+        self.send_json(200, {"id": mail_id, "read": True})
 
     def get_sent(self, params, item=None):
         limit = min(max(int(params.get("limit", 50)), 1), 200)

@@ -235,11 +235,12 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 |---|---|---|---|
 | GET | `/api/mailboxes` | `scenario`（可选，按场景标识筛选）、`limit`（默认 100，上限 500） | `{"mailboxes": [...]}` |
 | GET | `/api/mails` | `address`（可选，不传返回全部）、`limit`（默认 50，上限 200） | `{"mails": [...]}` |
+| POST | `/api/read/{id}` | 无 | 把一封邮件标为已读，返回 `{"id", "read": true}` |
 | GET | `/api/stats` | 无 | 统计数字 |
 
 邮箱对象：`address`、`domain`、`scenario`（标识）、`scenario_name`、`created_at`、`mail_count`、`last_mail_at`。按最近活动时间倒序。
 
-邮件对象：`id`、`address`、`from`、`subject`、`body`（纯文本正文）、`code`、`received_at`。按接收时间倒序。
+邮件对象：`id`、`address`、`from`、`subject`、`body`（纯文本正文）、`code`、`received_at`、`read`（是否已读）。按接收时间倒序。通过 `/api/code` 查询验证码不会改变已读状态。
 
 统计：`domains`、`mailboxes`、`mails`、`mails_24h`、`codes`。
 

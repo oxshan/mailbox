@@ -665,6 +665,11 @@ button.code:hover {
   font-weight: 600;
 }
 
+.mail.read .subject {
+  color: var(--text-2);
+  font-weight: 400;
+}
+
 .meta {
   grid-area: meta;
   color: var(--muted);
