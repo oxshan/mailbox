@@ -553,6 +553,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         pass
 
     def send_json(self, status, payload):
+        if status == 200:
+            payload = {"code": 0, "msg": "ok", "data": payload}
+        else:
+            payload = {"code": status, "msg": payload["error"], "data": None}
         body = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -684,7 +688,7 @@ class ApiHandler(BaseHTTPRequestHandler):
     def post_templates(self, params, item=None):
         if item == "test":
             regex = compile_template(str(params.get("mode", "placeholder")), str(params.get("pattern", "")))
-            return self.send_json(200, {"code": extract_with_template(regex, "", str(params.get("sample", "")), "")})
+            return self.send_json(200, {"verify_code": extract_with_template(regex, "", str(params.get("sample", "")), "")})
         if item:
             raise LookupError(item)
         fields = self.template_fields(params)
@@ -818,7 +822,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             200,
             {
                 "address": address,
-                "code": row.get("code"),
+                "verify_code": row.get("code"),
                 "from": row.get("sender"),
                 "subject": row.get("subject"),
                 "received_at": row.get("received_at"),
@@ -843,7 +847,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         address = str(params.get("address", "")).strip().lower()
         limit = min(max(int(params.get("limit", 50)), 1), 200)
         sql = (
-            "SELECT id, address, sender AS 'from', subject, body, code, received_at, read_at IS NOT NULL AS read"
+            "SELECT id, address, sender AS 'from', subject, body, code AS verify_code, received_at,"
+            " read_at IS NOT NULL AS read"
             " FROM mails WHERE deleted_at IS NULL"
         )
         if address:

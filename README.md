@@ -135,13 +135,32 @@ invite code[:：]\s*([A-Z0-9]{4}-[A-Z0-9]{4})
 - 鉴权：请求头带 `X-API-Key: <密钥>` 或 `Authorization: Bearer <密钥>`。
 - 参数可以放在查询串里，`POST`/`PUT` 也可以用 JSON 请求体。
 - 时间字段都是 Unix 时间戳（秒，浮点数）。
-- 出错时返回 `{"error": "原因"}`：
+- 所有响应都是同一种结构：
+
+  ```json
+  {"code": 0, "msg": "ok", "data": { ... }}
+  ```
+
+  | 字段 | 说明 |
+  |---|---|
+  | `code` | `0` 表示成功；失败时等于 HTTP 状态码 |
+  | `msg` | 成功时为 `ok`，失败时为错误原因 |
+  | `data` | 成功时为返回内容，失败时为 `null` |
+
+  失败时 HTTP 状态码同时反映错误类型：
 
   | 状态码 | 含义 |
   |---|---|
   | 400 | 参数有误 |
   | 401 | API Key 缺失或错误 |
   | 404 | 接口或记录不存在 |
+  | 502 | 发信时 Resend 拒绝或连接失败 |
+
+  ```json
+  {"code": 400, "msg": "业务场景不存在：abc", "data": null}
+  ```
+
+下文各接口的“返回”描述的都是 `data` 里的内容。
 
 ### 生成随机邮箱
 
@@ -157,7 +176,11 @@ curl -X POST -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/mailbox?scenario=gi
 ```
 
 ```json
-{"address": "w5ht2qv1rp@a.com", "domain": "a.com", "scenario": "github", "created_at": 1795197731.47}
+{
+  "code": 0,
+  "msg": "ok",
+  "data": {"address": "w5ht2qv1rp@a.com", "domain": "a.com", "scenario": "github", "created_at": 1795197731.47}
+}
 ```
 
 ### 查询验证码
@@ -176,15 +199,19 @@ curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/code?address=w5ht2qv1rp@a.c
 
 ```json
 {
-  "address": "w5ht2qv1rp@a.com",
-  "code": "739104",
-  "from": "GitHub <noreply@github.com>",
-  "subject": "[GitHub] Please verify your device",
-  "received_at": 1795197731.55
+  "code": 0,
+  "msg": "ok",
+  "data": {
+    "address": "w5ht2qv1rp@a.com",
+    "verify_code": "739104",
+    "from": "GitHub <noreply@github.com>",
+    "subject": "[GitHub] Please verify your device",
+    "received_at": 1795197731.55
+  }
 }
 ```
 
-返回的是最近一封带验证码的邮件。没有时 `code` 及其余字段为 `null`。
+返回的是最近一封带验证码的邮件。没有时外层 `code` 仍为 `0`，`verify_code` 及其余字段为 `null`。
 
 ### 调用示例（Python）
 
@@ -194,12 +221,15 @@ import requests
 BASE = "http://127.0.0.1:8080"
 HEADERS = {"X-API-Key": "你的密钥"}
 
-address = requests.post(f"{BASE}/api/mailbox", params={"scenario": "github"}, headers=HEADERS).json()["address"]
+box = requests.post(f"{BASE}/api/mailbox", params={"scenario": "github"}, headers=HEADERS).json()
+if box["code"] != 0:
+    raise RuntimeError(box["msg"])
+address = box["data"]["address"]
 
 # ……用 address 去目标网站注册……
 
 result = requests.get(f"{BASE}/api/code", params={"address": address, "wait": 60}, headers=HEADERS, timeout=70).json()
-print(result["code"])
+print(result["data"]["verify_code"])
 ```
 
 ### 发送邮件
@@ -240,7 +270,7 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 
 邮箱对象：`address`、`domain`、`scenario`（标识）、`scenario_name`、`created_at`、`mail_count`、`last_mail_at`。按最近活动时间倒序。
 
-邮件对象：`id`、`address`、`from`、`subject`、`body`（纯文本正文）、`code`、`received_at`、`read`（是否已读）。按接收时间倒序。通过 `/api/code` 查询验证码不会改变已读状态。
+邮件对象：`id`、`address`、`from`、`subject`、`body`（纯文本正文）、`verify_code`、`received_at`、`read`（是否已读）。按接收时间倒序。通过 `/api/code` 查询验证码不会改变已读状态。
 
 统计：`domains`、`mailboxes`、`mails`、`mails_24h`、`codes`。
 
@@ -283,7 +313,7 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 | `pattern` | 是 | 模板内容 |
 | `sample` | 否 | 示例邮件，仅用于在看板里测试 |
 
-试运行传 `mode`、`pattern`、`sample`，返回 `{"code": "提取结果或 null"}`：
+试运行传 `mode`、`pattern`、`sample`，返回 `{"verify_code": "提取结果或 null"}`：
 
 ```bash
 curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \

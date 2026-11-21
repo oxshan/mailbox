@@ -14,7 +14,7 @@ export interface Mail {
   from: string
   subject: string
   body: string
-  code: string | null
+  verify_code: string | null
   received_at: number
   read: boolean
 }
@@ -114,9 +114,9 @@ async function request<T>(path: string, { method = 'GET', params = {}, body }: R
     body: body === undefined ? undefined : JSON.stringify(body),
   })
   if (response.status === 401) throw new UnauthorizedError('API Key 无效')
-  const data = await response.json()
-  if (!response.ok) throw new Error(data.error ?? `请求失败 (${response.status})`)
-  return data as T
+  const reply: { code: number; msg: string; data: T } = await response.json()
+  if (reply.code !== 0) throw new Error(reply.msg || `请求失败 (${response.status})`)
+  return reply.data
 }
 
 export const api = {
@@ -148,5 +148,7 @@ export const api = {
     request<{ id: number }>(id ? `templates/${id}` : 'templates', { method: id ? 'PUT' : 'POST', body: input }),
   deleteTemplate: (id: number) => request<{ id: number }>(`templates/${id}`, { method: 'DELETE' }),
   testTemplate: (input: Pick<TemplateInput, 'mode' | 'pattern' | 'sample'>) =>
-    request<{ code: string | null }>('templates/test', { method: 'POST', body: input }).then((r) => r.code),
+    request<{ verify_code: string | null }>('templates/test', { method: 'POST', body: input }).then(
+      (r) => r.verify_code,
+    ),
 }

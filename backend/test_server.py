@@ -148,12 +148,16 @@ class EndToEndTest(unittest.TestCase):
             data=None if body is None else json.dumps(body).encode(),
         )
         with urllib.request.urlopen(request, timeout=10) as response:
-            return json.loads(response.read())
+            body = json.loads(response.read())
+        self.assertEqual((body["code"], body["msg"]), (0, "ok"))
+        return body["data"]
 
     def api_error(self, *args, **kwargs):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self.api(*args, **kwargs)
-        return ctx.exception.code, json.loads(ctx.exception.read())["error"]
+        body = json.loads(ctx.exception.read())
+        self.assertEqual((body["code"], body["data"]), (ctx.exception.code, None))
+        return ctx.exception.code, body["msg"]
 
     def test_scenario_generates_mailbox_and_parses_with_template(self):
         template = self.api(
@@ -170,9 +174,9 @@ class EndToEndTest(unittest.TestCase):
         self.assertTrue(box["address"].endswith("@b.test"))
         self.assertEqual(box["scenario"], "signup")
         self.send(box["address"], "Welcome", "Order 123456 confirmed.\nYour access token:  AB12-CD34\nBye")
-        self.assertEqual(self.api("/api/code?address=" + box["address"])["code"], "AB12-CD34")
+        self.assertEqual(self.api("/api/code?address=" + box["address"])["verify_code"], "AB12-CD34")
         self.send(box["address"], "Other", "Your verification code is 998877")
-        self.assertEqual(self.api("/api/code?address=" + box["address"])["code"], "AB12-CD34")
+        self.assertEqual(self.api("/api/code?address=" + box["address"])["verify_code"], "AB12-CD34")
 
         listed = self.api("/api/mailboxes?scenario=signup")["mailboxes"]
         self.assertEqual([b["address"] for b in listed], [box["address"]])
@@ -188,12 +192,12 @@ class EndToEndTest(unittest.TestCase):
             method="PUT",
             body={"name": "令牌", "mode": "regex", "pattern": r"code is (\d{6})"},
         )
-        self.assertEqual(self.api("/api/code?address=" + box["address"])["code"], "998877")
+        self.assertEqual(self.api("/api/code?address=" + box["address"])["verify_code"], "998877")
 
         self.api("/api/scenarios/%d" % scenario["id"], method="DELETE")
         moved = {b["address"]: b for b in self.api("/api/mailboxes")["mailboxes"]}[box["address"]]
         self.assertEqual(moved["scenario"], "default")
-        codes = [m["code"] for m in self.api("/api/mails?address=" + box["address"])["mails"]]
+        codes = [m["verify_code"] for m in self.api("/api/mails?address=" + box["address"])["mails"]]
         self.assertEqual(codes, ["998877", "123456"])
         self.api("/api/templates/%d" % template["id"], method="DELETE")
         self.assertEqual(self.api("/api/templates")["templates"], [])
@@ -240,7 +244,7 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(seen, {"c.test"})
         self.assertNotIn("d.test", {self.api("/api/mailbox")["domain"] for _ in range(30)})
         self.send("still@d.test", "Hi", "code 4455")
-        self.assertEqual(self.api("/api/code?address=still@d.test")["code"], "4455")
+        self.assertEqual(self.api("/api/code?address=still@d.test")["verify_code"], "4455")
         listed = {d["name"]: d for d in self.api("/api/domains")["domains"]}
         self.assertEqual((listed["d.test"]["enabled"], listed["c.test"]["note"]), (False, "备用"))
         self.assertEqual(listed["c.test"]["scenario_count"], 1)
@@ -344,9 +348,9 @@ class EndToEndTest(unittest.TestCase):
 
     def test_template_test_endpoint(self):
         body = {"mode": "placeholder", "pattern": "验证码：{code}，{*}有效", "sample": "您的验证码：X9K2P，10 分钟内有效"}
-        self.assertEqual(self.api("/api/templates/test", method="POST", body=body)["code"], "X9K2P")
+        self.assertEqual(self.api("/api/templates/test", method="POST", body=body)["verify_code"], "X9K2P")
         body["sample"] = "没有验证码"
-        self.assertIsNone(self.api("/api/templates/test", method="POST", body=body)["code"])
+        self.assertIsNone(self.api("/api/templates/test", method="POST", body=body)["verify_code"])
 
     def send(self, to, subject, body, html=None):
         msg = EmailMessage()
@@ -375,16 +379,16 @@ class EndToEndTest(unittest.TestCase):
 
     def test_receive_and_query_code(self):
         address = self.api("/api/mailbox?domain=a.test")["address"]
-        self.assertIsNone(self.api("/api/code?address=" + address)["code"])
+        self.assertIsNone(self.api("/api/code?address=" + address)["verify_code"])
         self.send(address, "验证码", "您的验证码是 135790，请勿泄露。")
         result = self.api("/api/code?address=" + address)
-        self.assertEqual(result["code"], "135790")
+        self.assertEqual(result["verify_code"], "135790")
         self.assertEqual(result["subject"], "验证码")
         self.assertIn("noreply@example.com", result["from"])
         self.send(address, "New code", "plain", html="<p>Your code is <b>864209</b></p>")
-        self.assertEqual(self.api("/api/code?address=" + address)["code"], "864209")
+        self.assertEqual(self.api("/api/code?address=" + address)["verify_code"], "864209")
         mails = self.api("/api/mails?address=" + address)["mails"]
-        self.assertEqual([m["code"] for m in mails], ["864209", "135790"])
+        self.assertEqual([m["verify_code"] for m in mails], ["864209", "135790"])
         boxes = {b["address"]: b for b in self.api("/api/mailboxes")["mailboxes"]}
         self.assertEqual(boxes[address]["mail_count"], 2)
         self.assertGreaterEqual(self.api("/api/stats")["codes"], 2)
@@ -399,26 +403,26 @@ class EndToEndTest(unittest.TestCase):
         self.api("/api/read/%d" % first["id"], method="POST")
         second, first = self.api("/api/mails?address=" + address)["mails"]
         self.assertEqual((first["read"], second["read"]), (True, False))
-        self.assertEqual(self.api("/api/code?address=" + address)["code"], "100002")
+        self.assertEqual(self.api("/api/code?address=" + address)["verify_code"], "100002")
         self.assertEqual(self.api_error("/api/read/99999999", method="POST")[0], 404)
 
     def test_since_filters_old_codes(self):
         address = self.api("/api/mailbox?domain=a.test")["address"]
         self.send(address, "Code", "code 111222")
         future = time.time() + 5
-        self.assertIsNone(self.api("/api/code?address=%s&since=%s" % (address, future))["code"])
+        self.assertIsNone(self.api("/api/code?address=%s&since=%s" % (address, future))["verify_code"])
 
     def test_long_poll_waits_for_mail(self):
         address = self.api("/api/mailbox?domain=a.test")["address"]
         threading.Timer(1.0, self.send, (address, "Login", "Your code: 5566")).start()
         started = time.time()
         result = self.api("/api/code?address=%s&wait=10" % address)
-        self.assertEqual(result["code"], "5566")
+        self.assertEqual(result["verify_code"], "5566")
         self.assertLess(time.time() - started, 5)
 
     def test_catch_all_and_unknown_domain(self):
         self.send("anything.goes@b.test", "Hi", "PIN 4821")
-        self.assertEqual(self.api("/api/code?address=Anything.Goes@b.test")["code"], "4821")
+        self.assertEqual(self.api("/api/code?address=Anything.Goes@b.test")["verify_code"], "4821")
         with self.assertRaises(smtplib.SMTPRecipientsRefused):
             self.send("someone@other.test", "Hi", "code 1234")
 
@@ -446,7 +450,7 @@ class EndToEndTest(unittest.TestCase):
         store.purge(3600)
 
         self.assertEqual(self.api("/api/mails?address=" + address)["mails"], [])
-        self.assertIsNone(self.api("/api/code?address=" + address)["code"])
+        self.assertIsNone(self.api("/api/code?address=" + address)["verify_code"])
         self.assertNotIn(address, [b["address"] for b in self.api("/api/mailboxes")["mailboxes"]])
         self.assertNotIn("old", [m["subject"] for m in self.api("/api/sent")["mails"]])
         after = self.api("/api/stats")
@@ -459,7 +463,7 @@ class EndToEndTest(unittest.TestCase):
         self.assertIsNotNone(store.query("SELECT deleted_at FROM sent_mails WHERE subject = 'old'")[0]["deleted_at"])
 
         self.send(address, "Again", "code 112233")
-        self.assertEqual(self.api("/api/code?address=" + address)["code"], "112233")
+        self.assertEqual(self.api("/api/code?address=" + address)["verify_code"], "112233")
         revived = {b["address"]: b for b in self.api("/api/mailboxes")["mailboxes"]}[address]
         self.assertEqual((revived["scenario"], revived["mail_count"]), ("keep", 1))
         self.api("/api/scenarios/%d" % scenario["id"], method="DELETE")

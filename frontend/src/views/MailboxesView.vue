@@ -84,8 +84,8 @@ function toggle(mail: Mail) {
 }
 
 function copyCode(mail: Mail) {
-  if (!mail.code) return
-  copy(mail.code, `已复制验证码 ${mail.code}`)
+  if (!mail.verify_code) return
+  copy(mail.verify_code, `已复制验证码 ${mail.verify_code}`)
   markRead(mail)
 }
 
@@ -188,14 +188,14 @@ onBeforeUnmount(() => window.clearInterval(timer))
         <li v-for="mail in mails" :key="mail.id" class="mail" :class="{ open: expanded === mail.id, read: mail.read }">
           <div class="mail-row">
             <button
-              v-if="mail.code"
+              v-if="mail.verify_code"
               class="code"
               type="button"
-              :title="`点击复制 ${mail.code}`"
-              :aria-label="`复制验证码 ${mail.code}`"
+              :title="`点击复制 ${mail.verify_code}`"
+              :aria-label="`复制验证码 ${mail.verify_code}`"
               @click="copyCode(mail)"
             >
-              {{ mail.code }}
+              {{ mail.verify_code }}
             </button>
             <span v-else class="code none">无</span>
             <button
