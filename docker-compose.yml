@@ -1,0 +1,18 @@
+services:
+  mailbox:
+    build: .
+    image: mailbox:latest
+    container_name: mailbox
+    restart: unless-stopped
+    environment:
+      MAIL_DOMAINS: ${MAIL_DOMAINS:-}
+      API_KEY: ${API_KEY:-}
+      RETENTION_HOURS: ${RETENTION_HOURS:-24}
+    ports:
+      - "${SMTP_PORT:-25}:2525"
+      - "${HTTP_PORT:-8080}:8080"
+    volumes:
+      - mailbox-data:/data
+
+volumes:
+  mailbox-data:
