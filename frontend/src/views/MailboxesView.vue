@@ -134,7 +134,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
           <button class="box single" :class="{ active: selected === '' }" type="button" @click="selected = ''">
             <Icon name="inbox" />
             <span class="box-name">全部邮件</span>
-            <span class="pill">{{ stats?.mails ?? 0 }}</span>
+            <span class="box-count">共 {{ stats?.mails ?? 0 }} 封</span>
           </button>
         </li>
         <li v-for="box in visibleBoxes" :key="box.address">
@@ -146,7 +146,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
             @click="selected = box.address"
           >
             <span class="box-name mono">{{ box.address }}</span>
-            <span class="pill" :class="{ zero: !box.mail_count }">{{ box.mail_count }}</span>
+            <span class="box-count">共 {{ box.mail_count }} 封</span>
             <span class="box-meta">
               <span class="tag">{{ box.scenario_name ?? '默认场景' }}</span>
               <time>{{ formatTime(box.last_mail_at ?? box.created_at) }}</time>

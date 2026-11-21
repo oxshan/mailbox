@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 import server
 from server import (
@@ -257,20 +258,34 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(self.api_error("/api/domains/%d" % c_id, method="DELETE")[0], 404)
 
     def test_domain_check(self):
-        original = server.resolve_mx
+        original, original_ip = server.resolve_mx, server.public_ip
+        check = lambda: self.api("/api/domains/check", method="POST", body={"name": "a.test"})
         self.app.cfg.mx_check_port = self.app.smtp_port
         try:
+            server.public_ip = lambda cfg: None
             server.resolve_mx = lambda name: [(10, "127.0.0.1")]
-            self.assertEqual(self.api("/api/domains/check", method="POST", body={"name": "a.test"})["status"], "ok")
+            self.assertEqual(check()["status"], "ok")
             server.resolve_mx = lambda name: []
-            self.assertEqual(self.api("/api/domains/check", method="POST", body={"name": "a.test"})["status"], "missing")
+            self.assertEqual(check()["status"], "missing")
             server.resolve_mx = lambda name: [(10, "127.0.0.1")]
             self.app.cfg.mx_check_port = self.app.http_port
-            result = self.api("/api/domains/check", method="POST", body={"name": "a.test"})
+            result = check()
             self.assertIn(result["status"], ("mismatch", "unverified"))
             self.assertEqual(result["mx"], ["10 127.0.0.1"])
+
+            self.app.cfg.mx_check_port = 1
+            self.assertEqual(check()["status"], "unverified")
+            server.public_ip = lambda cfg: "127.0.0.1"
+            result = check()
+            self.assertEqual(result["status"], "ok")
+            self.assertIn("公网 IP", result["message"])
+            server.public_ip = lambda cfg: "203.0.113.9"
+            self.assertEqual(check()["status"], "mismatch")
+            server.resolve_mx = lambda name: [(10, "no-such-host.invalid")]
+            with mock.patch.object(server.socket, "getaddrinfo", side_effect=OSError("unknown host")):
+                self.assertEqual(server.check_domain("a.test", "x", own_ip="203.0.113.9")["status"], "error")
         finally:
-            server.resolve_mx = original
+            server.resolve_mx, server.public_ip = original, original_ip
         self.assertEqual(self.api_error("/api/domains/check", method="POST", body={"name": "nope.test"})[0], 404)
 
     def test_send_mail(self):
@@ -399,12 +414,42 @@ class EndToEndTest(unittest.TestCase):
             self.send("big@a.test", "Big", "x" * 50000)
         self.assertEqual(ctx.exception.smtp_code, 552)
 
-    def test_purge_removes_old_mail(self):
-        address = self.api("/api/mailbox?domain=a.test")["address"]
+    def test_purge_hides_old_mail_without_deleting_it(self):
+        store = self.app.store
+        scenario = self.api("/api/scenarios", method="POST", body={"name": "保留", "key": "keep"})
+        address = self.api("/api/mailbox?scenario=keep&domain=a.test")["address"]
         self.send(address, "Code", "code 998877")
-        self.app.store.execute("UPDATE mails SET received_at = received_at - 7200 WHERE address = ?", (address,))
-        self.app.store.purge(3600)
+        cfg = self.app.cfg
+        cfg.resend_api_key, original_url = "re_test", cfg.resend_api_url
+        cfg.resend_api_url = "http://127.0.0.1:1/emails"
+        try:
+            self.api_error("/api/send", method="POST", body={"from": "a@a.test", "to": "x@example.com", "subject": "old", "text": "t"})
+        finally:
+            cfg.resend_api_key, cfg.resend_api_url = "", original_url
+        store.execute("UPDATE mails SET received_at = received_at - 7200 WHERE address = ?", (address,))
+        store.execute("UPDATE mailboxes SET created_at = created_at - 7200 WHERE address = ?", (address,))
+        store.execute("UPDATE sent_mails SET created_at = created_at - 7200 WHERE subject = 'old'")
+        before = self.api("/api/stats")
+        store.purge(3600)
+
         self.assertEqual(self.api("/api/mails?address=" + address)["mails"], [])
+        self.assertIsNone(self.api("/api/code?address=" + address)["code"])
+        self.assertNotIn(address, [b["address"] for b in self.api("/api/mailboxes")["mailboxes"]])
+        self.assertNotIn("old", [m["subject"] for m in self.api("/api/sent")["mails"]])
+        after = self.api("/api/stats")
+        self.assertEqual((after["mails"], after["mailboxes"]), (before["mails"] - 1, before["mailboxes"] - 1))
+
+        kept = store.query("SELECT code, deleted_at FROM mails WHERE address = ?", (address,))
+        self.assertEqual(kept[0]["code"], "998877")
+        self.assertIsNotNone(kept[0]["deleted_at"])
+        self.assertIsNotNone(store.query("SELECT deleted_at FROM mailboxes WHERE address = ?", (address,))[0]["deleted_at"])
+        self.assertIsNotNone(store.query("SELECT deleted_at FROM sent_mails WHERE subject = 'old'")[0]["deleted_at"])
+
+        self.send(address, "Again", "code 112233")
+        self.assertEqual(self.api("/api/code?address=" + address)["code"], "112233")
+        revived = {b["address"]: b for b in self.api("/api/mailboxes")["mailboxes"]}[address]
+        self.assertEqual((revived["scenario"], revived["mail_count"]), ("keep", 1))
+        self.api("/api/scenarios/%d" % scenario["id"], method="DELETE")
 
 
 if __name__ == "__main__":

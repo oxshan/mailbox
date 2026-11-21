@@ -80,6 +80,7 @@ MAIL_DOMAINS=a.com,b.com API_KEY=你的密钥 python3 server.py
 | `STATIC_DIR` | `frontend/dist` | 看板静态文件目录 |
 | `RETENTION_HOURS` | `24` | 邮件保留时长（小时） |
 | `RESEND_API_KEY` | 空 | Resend 的 API Key。留空则不启用发信 |
+| `PUBLIC_IP` | 自动探测 | 本服务器的公网 IP，用于 MX 检测。留空时启动后向外部服务查询一次 |
 | `MAX_MAIL_BYTES` | `2097152` | 单封邮件大小上限，超过则拒收 |
 
 Docker 方式下，`.env` 里的 `SMTP_PORT` 和 `HTTP_PORT` 指的是宿主机端口。
@@ -307,13 +308,13 @@ MX 检测返回 `status`、`message`、`mx`（记录列表，如 `"10 mail.a.com
 
 | 值 | 含义 |
 |---|---|
-| `ok` | MX 指向本服务器（连上后核对过身份） |
+| `ok` | MX 指向本服务器 |
 | `missing` | 没有 MX 记录 |
-| `mismatch` | MX 指向了另一台邮件服务器 |
-| `unverified` | 有 MX 记录，但从本机连不上对方的 25 端口，无法确认 |
-| `error` | DNS 查询失败 |
+| `mismatch` | MX 指向了另一台服务器 |
+| `unverified` | 有 MX 记录，但不知道本机公网 IP，也连不上对方的 25 端口，无法确认 |
+| `error` | DNS 查询失败，或 MX 指向的主机名解析不出 IP |
 
-不少云厂商会封出站 25 端口，这时结果只会是 `unverified`，不代表配置有误，实际发一封邮件测试最可靠。
+判定方式：MX 指向的主机解析出的 IP 等于本服务器的公网 IP 时直接判为 `ok`，不需要出站连接，所以云厂商封锁出站 25 端口不影响检测。IP 不一致时才会尝试连接对方的 25 端口核对身份。公网 IP 取自 `PUBLIC_IP`，未设置时自动探测。
 
 ## 开发
 

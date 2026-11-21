@@ -549,23 +549,12 @@ select:hover {
   color: var(--primary);
 }
 
-.pill {
+.box-count {
   flex: none;
-  min-width: 22px;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--primary);
-  color: var(--on-primary);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 18px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-
-.pill.zero {
-  background: var(--border);
   color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .panel-head {

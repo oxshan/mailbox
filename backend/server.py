@@ -39,6 +39,7 @@ class Config:
         self.retention_hours = float(env("RETENTION_HOURS", "24"))
         self.max_mail_bytes = int(env("MAX_MAIL_BYTES", str(2 * 1024 * 1024)))
         self.mx_check_port = 25
+        self.public_ip = env("PUBLIC_IP", "").strip()
         self.resend_api_key = env("RESEND_API_KEY", "")
         self.resend_api_url = env("RESEND_API_URL", "https://api.resend.com/emails")
         for key, value in overrides.items():
@@ -212,8 +213,31 @@ def resolve_mx(name, timeout=3):
     raise OSError("DNS 查询失败：%s" % error)
 
 
-def check_domain(name, instance_id, port=25, timeout=5):
-    """Check that mail for a domain reaches this server: resolve MX, connect, compare the SMTP banner."""
+_PUBLIC_IP = {}
+
+
+def public_ip(cfg):
+    """This server's public IP: PUBLIC_IP if set, otherwise asked once from an external service."""
+    if cfg.public_ip:
+        return cfg.public_ip
+    if "value" not in _PUBLIC_IP:
+        _PUBLIC_IP["value"] = None
+        for url in ("https://checkip.amazonaws.com", "https://api.ipify.org"):
+            try:
+                request = urllib.request.Request(url, headers={"User-Agent": "mailbox/1.0"})
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    _PUBLIC_IP["value"] = response.read().decode().strip()
+                break
+            except (OSError, ValueError):
+                continue
+    return _PUBLIC_IP["value"]
+
+
+def check_domain(name, instance_id, port=25, timeout=5, own_ip=None):
+    """Check that mail for a domain reaches this server.
+
+    The MX host resolving to our own public IP is enough; otherwise connect and compare the SMTP banner.
+    """
     try:
         records = resolve_mx(name)
     except (OSError, UnicodeError) as exc:
@@ -223,10 +247,20 @@ def check_domain(name, instance_id, port=25, timeout=5):
         return {"status": "missing", "message": "没有 MX 记录", "mx": mx}
     host = records[0][1]
     try:
+        addresses = sorted({info[4][0] for info in socket.getaddrinfo(host, None)})
+    except OSError:
+        return {"status": "error", "message": "MX 指向 %s，但这个主机名解析不出 IP" % host, "mx": mx}
+    if own_ip and own_ip in addresses:
+        return {"status": "ok", "message": "MX 指向 %s（%s），就是本服务器的公网 IP" % (host, own_ip), "mx": mx}
+    try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
             banner = sock.recv(512).decode("utf-8", "replace").strip()
     except OSError as exc:
-        message = "MX 指向 %s，但从本机连不上它的 %d 端口，无法确认（%s）" % (host, port, exc)
+        where = "%s（%s）" % (host, "、".join(addresses))
+        if own_ip:
+            message = "MX 指向 %s，与本服务器的公网 IP %s 不一致，也连不上它的 %d 端口" % (where, own_ip, port)
+            return {"status": "mismatch", "message": message, "mx": mx}
+        message = "MX 指向 %s，但从本机连不上它的 %d 端口，无法确认（%s）" % (where, port, exc)
         return {"status": "unverified", "message": message, "mx": mx}
     if instance_id in banner:
         return {"status": "ok", "message": "MX 指向 %s，已确认是本服务器" % host, "mx": mx}
@@ -295,6 +329,8 @@ class Store:
         )
         self.add_column("mailboxes", "scenario_id", "INTEGER")
         self.add_column("mails", "alt", "TEXT NOT NULL DEFAULT ''")
+        for table in ("mailboxes", "mails", "sent_mails"):
+            self.add_column(table, "deleted_at", "REAL")
         self.execute(
             "INSERT OR IGNORE INTO scenarios (key, name, created_at) VALUES (?, '默认场景', ?)",
             (DEFAULT_SCENARIO, time.time()),
@@ -366,6 +402,7 @@ class Store:
                 "INSERT OR IGNORE INTO mailboxes (address, domain, created_at, scenario_id) VALUES (?, ?, ?, ?)",
                 (address, address.rsplit("@", 1)[1], now, self.default_scenario_id),
             )
+            self.db.execute("UPDATE mailboxes SET deleted_at = NULL WHERE address = ?", (address,))
             self.db.execute(
                 "INSERT INTO mails (address, sender, subject, body, alt, code, received_at)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -382,7 +419,7 @@ class Store:
             template = rows[0] if rows else None
             mails = self.query(
                 "SELECT m.id, m.subject, m.body, m.alt, m.code FROM mails m JOIN mailboxes b ON b.address = m.address"
-                " WHERE b.scenario_id = ?",
+                " WHERE b.scenario_id = ? AND m.deleted_at IS NULL",
                 (scenario_id,),
             )
             for mail in mails:
@@ -393,19 +430,22 @@ class Store:
     def latest_code(self, address, since=0.0):
         rows = self.query(
             "SELECT code, sender, subject, received_at FROM mails"
-            " WHERE address = ? AND code IS NOT NULL AND received_at >= ? ORDER BY id DESC LIMIT 1",
+            " WHERE address = ? AND code IS NOT NULL AND received_at >= ? AND deleted_at IS NULL"
+            " ORDER BY id DESC LIMIT 1",
             (address, since),
         )
         return rows[0] if rows else None
 
     def purge(self, max_age_seconds):
-        cutoff = time.time() - max_age_seconds
-        self.execute("DELETE FROM mails WHERE received_at < ?", (cutoff,))
-        self.execute("DELETE FROM sent_mails WHERE created_at < ?", (cutoff,))
+        """Soft-delete expired rows: they are flagged with deleted_at and hidden, never removed."""
+        now = time.time()
+        cutoff = now - max_age_seconds
+        self.execute("UPDATE mails SET deleted_at = ? WHERE received_at < ? AND deleted_at IS NULL", (now, cutoff))
+        self.execute("UPDATE sent_mails SET deleted_at = ? WHERE created_at < ? AND deleted_at IS NULL", (now, cutoff))
         self.execute(
-            "DELETE FROM mailboxes WHERE created_at < ?"
-            " AND address NOT IN (SELECT DISTINCT address FROM mails)",
-            (cutoff,),
+            "UPDATE mailboxes SET deleted_at = ? WHERE created_at < ? AND deleted_at IS NULL"
+            " AND address NOT IN (SELECT DISTINCT address FROM mails WHERE deleted_at IS NULL)",
+            (now, cutoff),
         )
 
 
@@ -558,7 +598,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def get_domains(self, params, item=None):
         rows = self.app.store.query(
-            "SELECT d.*, (SELECT COUNT(*) FROM mailboxes b WHERE b.domain = d.name) AS mailbox_count,"
+            "SELECT d.*, (SELECT COUNT(*) FROM mailboxes b WHERE b.domain = d.name AND b.deleted_at IS NULL)"
+            " AS mailbox_count,"
             " (SELECT COUNT(*) FROM scenario_domains sd WHERE sd.domain_id = d.id) AS scenario_count"
             " FROM domains d ORDER BY d.id"
         )
@@ -572,7 +613,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         if item == "check":
             if name not in store.domain_names():
                 raise LookupError(name)
-            return self.send_json(200, check_domain(name, self.app.instance_id, self.app.cfg.mx_check_port))
+            cfg = self.app.cfg
+            return self.send_json(
+                200, check_domain(name, self.app.instance_id, cfg.mx_check_port, own_ip=public_ip(cfg))
+            )
         if item:
             raise LookupError(item)
         if len(name) > 253 or not _DOMAIN.fullmatch(name):
@@ -671,7 +715,7 @@ class ApiHandler(BaseHTTPRequestHandler):
     def get_scenarios(self, params, item=None):
         rows = self.app.store.query(
             "SELECT s.*, t.name AS template_name,"
-            " (SELECT COUNT(*) FROM mailboxes b WHERE b.scenario_id = s.id) AS mailbox_count"
+            " (SELECT COUNT(*) FROM mailboxes b WHERE b.scenario_id = s.id AND b.deleted_at IS NULL) AS mailbox_count"
             " FROM scenarios s LEFT JOIN templates t ON t.id = s.template_id ORDER BY s.id"
         )
         links = self.app.store.query(
@@ -787,7 +831,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             "SELECT b.address, b.domain, b.created_at, s.key AS scenario, s.name AS scenario_name,"
             " COUNT(m.id) AS mail_count, MAX(m.received_at) AS last_mail_at"
             " FROM mailboxes b LEFT JOIN scenarios s ON s.id = b.scenario_id"
-            " LEFT JOIN mails m ON m.address = b.address WHERE (? = '' OR s.key = ?)"
+            " LEFT JOIN mails m ON m.address = b.address AND m.deleted_at IS NULL"
+            " WHERE b.deleted_at IS NULL AND (? = '' OR s.key = ?)"
             " GROUP BY b.address ORDER BY COALESCE(MAX(m.received_at), b.created_at) DESC LIMIT ?",
             (scenario, scenario, limit),
         )
@@ -796,9 +841,12 @@ class ApiHandler(BaseHTTPRequestHandler):
     def api_mails(self, params, item=None):
         address = str(params.get("address", "")).strip().lower()
         limit = min(max(int(params.get("limit", 50)), 1), 200)
-        sql = "SELECT id, address, sender AS 'from', subject, body, code, received_at FROM mails"
+        sql = (
+            "SELECT id, address, sender AS 'from', subject, body, code, received_at FROM mails"
+            " WHERE deleted_at IS NULL"
+        )
         if address:
-            rows = self.app.store.query(sql + " WHERE address = ? ORDER BY id DESC LIMIT ?", (address, limit))
+            rows = self.app.store.query(sql + " AND address = ? ORDER BY id DESC LIMIT ?", (address, limit))
         else:
             rows = self.app.store.query(sql + " ORDER BY id DESC LIMIT ?", (limit,))
         self.send_json(200, {"mails": rows})
@@ -807,7 +855,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         limit = min(max(int(params.get("limit", 50)), 1), 200)
         rows = self.app.store.query(
             "SELECT id, sender AS 'from', recipients AS 'to', subject, body, status, error, created_at"
-            " FROM sent_mails ORDER BY id DESC LIMIT ?",
+            " FROM sent_mails WHERE deleted_at IS NULL ORDER BY id DESC LIMIT ?",
             (limit,),
         )
         self.send_json(200, {"configured": bool(self.app.cfg.resend_api_key), "mails": rows})
@@ -855,9 +903,10 @@ class ApiHandler(BaseHTTPRequestHandler):
     def api_stats(self, params, item=None):
         day_ago = time.time() - 86400
         row = self.app.store.query(
-            "SELECT (SELECT COUNT(*) FROM mailboxes) AS mailboxes, (SELECT COUNT(*) FROM mails) AS mails,"
-            " (SELECT COUNT(*) FROM mails WHERE received_at >= ?) AS mails_24h,"
-            " (SELECT COUNT(*) FROM mails WHERE code IS NOT NULL) AS codes",
+            "SELECT (SELECT COUNT(*) FROM mailboxes WHERE deleted_at IS NULL) AS mailboxes,"
+            " (SELECT COUNT(*) FROM mails WHERE deleted_at IS NULL) AS mails,"
+            " (SELECT COUNT(*) FROM mails WHERE received_at >= ? AND deleted_at IS NULL) AS mails_24h,"
+            " (SELECT COUNT(*) FROM mails WHERE code IS NOT NULL AND deleted_at IS NULL) AS codes",
             (day_ago,),
         )[0]
         row["domains"] = len(self.app.store.domain_names())
