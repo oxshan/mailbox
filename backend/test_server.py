@@ -292,7 +292,8 @@ class EndToEndTest(unittest.TestCase):
             server.resolve_mx, server.public_ip = original, original_ip
         self.assertEqual(self.api_error("/api/domains/check", method="POST", body={"name": "nope.test"})[0], 404)
 
-    def test_send_mail(self):
+    def fake_resend(self):
+        """Start a stand-in for the Resend API and point the app at it. Returns (server, recorded calls)."""
         calls = []
 
         class FakeResend(BaseHTTPRequestHandler):
@@ -309,14 +310,93 @@ class EndToEndTest(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(reply)
 
-        mail = {"from": "Hello@A.test", "from_name": "客服", "to": "x@example.com, y@example.com", "subject": "Hi", "text": "body"}
-        self.assertFalse(self.api("/api/sent")["configured"])
-        self.assertIn("RESEND_API_KEY", self.api_error("/api/send", method="POST", body=mail)[1])
-
         fake = ThreadingHTTPServer(("127.0.0.1", 0), FakeResend)
         threading.Thread(target=fake.serve_forever, daemon=True).start()
         cfg = self.app.cfg
         cfg.resend_api_key, cfg.resend_api_url = "re_test", "http://127.0.0.1:%d/emails" % fake.server_address[1]
+        return fake, calls
+
+    def test_forward(self):
+        cfg = self.app.cfg
+        self.assertEqual(self.api("/api/forwards"), {"configured": False, "hourly_limit": 60, "forwards": []})
+        for bad in ("not-an-address", "", "me@a.test"):
+            self.assertEqual(self.api_error("/api/forwards", method="POST", body={"address": bad})[0], 400, bad)
+        first = self.api("/api/forwards", method="POST", body={"address": " Me@Example.com ", "note": "主邮箱"})["id"]
+        self.assertEqual(self.api_error("/api/forwards", method="POST", body={"address": "me@example.com"})[0], 400)
+        second = self.api("/api/forwards", method="POST", body={"address": "other@example.org", "enabled": False})["id"]
+        listed = self.api("/api/forwards")["forwards"]
+        self.assertEqual(
+            [(f["address"], f["enabled"], f["note"]) for f in listed],
+            [("me@example.com", True, "主邮箱"), ("other@example.org", False, "")],
+        )
+
+        def forwarded():
+            return [m for m in self.api("/api/sent?limit=200")["mails"] if m["kind"] == "forward"]
+
+        self.send("fw@a.test", "Unconfigured", "code 1111")
+        self.assertEqual(forwarded(), [])
+
+        fake, calls = self.fake_resend()
+        limit = cfg.forward_hourly_limit
+        try:
+            self.assertTrue(self.api("/api/forwards")["configured"])
+            self.send("fw@a.test", "Your code", "code 2468", html="<p>code <b>2468</b></p>")
+            self.assertEqual(self.api("/api/code?address=fw@a.test")["verify_code"], "2468")
+            self.assertEqual(len(calls), 1)
+            sent = calls[0][2]
+            self.assertEqual(sent["from"], '"Example via Mailbox" <fw@a.test>')
+            self.assertEqual((sent["to"], sent["reply_to"]), (["me@example.com"], "noreply@example.com"))
+            self.assertEqual((sent["subject"], sent["text"].strip()), ("Your code", "code 2468"))
+            self.assertIn("<b>2468</b>", sent["html"])
+            record = forwarded()[0]
+            self.assertEqual((record["from"], record["to"], record["status"]), ("fw@a.test", "me@example.com", "sent"))
+
+            self.api("/api/forwards/%d" % second, method="PUT", body={"enabled": True, "note": "备用"})
+            self.send("fw@a.test", "", "plain only")
+            sent = calls[-1][2]
+            self.assertEqual(sent["to"], ["me@example.com", "other@example.org"])
+            self.assertEqual(sent["subject"], "(无主题)")
+            self.assertNotIn("html", sent)
+
+            self.send("fw@a.test", "Auto reply", "out of office", sender="me@example.com")
+            self.assertEqual(calls[-1][2]["to"], ["other@example.org"])
+
+            self.send("fw@a.test", "reject", "body")
+            self.assertEqual((forwarded()[0]["status"], forwarded()[0]["subject"]), ("failed", "reject"))
+            self.assertIn("domain is not verified", forwarded()[0]["error"])
+
+            cfg.forward_hourly_limit = len(forwarded())
+            before = len(calls)
+            self.send("fw@a.test", "Over the limit", "code 3579")
+            self.send("fw@a.test", "Still over", "code 3580")
+            self.assertEqual(len(calls), before)
+            self.assertEqual(self.api("/api/code?address=fw@a.test")["verify_code"], "3580")
+            records = forwarded()
+            self.assertEqual(len(records), cfg.forward_hourly_limit + 1)
+            self.assertEqual((records[0]["status"], records[0]["subject"]), ("failed", "Over the limit"))
+            self.assertIn("上限", records[0]["error"])
+            cfg.forward_hourly_limit = limit
+
+            self.api("/api/forwards/%d" % first, method="PUT", body={"enabled": False})
+            self.api("/api/forwards/%d" % second, method="DELETE")
+            self.send("fw@a.test", "Nobody listening", "code 9999")
+            self.assertEqual(len(calls), before)
+            self.assertEqual(self.api_error("/api/forwards/%d" % second, method="DELETE")[0], 404)
+            self.assertEqual(self.api_error("/api/forwards/%d" % second, method="PUT", body={"enabled": True})[0], 404)
+        finally:
+            cfg.resend_api_key, cfg.forward_hourly_limit = "", limit
+            fake.shutdown()
+            fake.server_close()
+            self.app.store.execute("DELETE FROM forwards")
+            self.app.store.execute("DELETE FROM sent_mails WHERE kind = 'forward'")
+
+    def test_send_mail(self):
+        mail = {"from": "Hello@A.test", "from_name": "客服", "to": "x@example.com, y@example.com", "subject": "Hi", "text": "body"}
+        self.assertFalse(self.api("/api/sent")["configured"])
+        self.assertIn("RESEND_API_KEY", self.api_error("/api/send", method="POST", body=mail)[1])
+
+        fake, calls = self.fake_resend()
+        cfg = self.app.cfg
         try:
             self.assertEqual(self.api("/api/send", method="POST", body=mail)["provider_id"], "re_123")
             auth, agent, sent = calls[-1]
@@ -352,9 +432,9 @@ class EndToEndTest(unittest.TestCase):
         body["sample"] = "没有验证码"
         self.assertIsNone(self.api("/api/templates/test", method="POST", body=body)["verify_code"])
 
-    def send(self, to, subject, body, html=None):
+    def send(self, to, subject, body, html=None, sender="Example <noreply@example.com>"):
         msg = EmailMessage()
-        msg["From"] = "Example <noreply@example.com>"
+        msg["From"] = sender
         msg["To"] = to
         msg["Subject"] = subject
         msg.set_content(body)

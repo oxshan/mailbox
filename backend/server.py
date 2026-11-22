@@ -18,11 +18,13 @@ import time
 import urllib.error
 import urllib.request
 from email import message_from_bytes, policy
+from email.utils import parseaddr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SCENARIO = "default"
+MAX_FORWARDS = 20
 
 
 class Config:
@@ -42,6 +44,7 @@ class Config:
         self.public_ip = env("PUBLIC_IP", "").strip()
         self.resend_api_key = env("RESEND_API_KEY", "")
         self.resend_api_url = env("RESEND_API_URL", "https://api.resend.com/emails")
+        self.forward_hourly_limit = int(env("FORWARD_HOURLY_LIMIT", "60"))
         for key, value in overrides.items():
             setattr(self, key, value)
 
@@ -124,21 +127,24 @@ def html_to_text(markup):
 
 
 def parse_mail(raw):
-    """Return (sender, subject, plain text, html as text) of a raw RFC822 message."""
+    """Return (sender, subject, plain text, html as text, html, attachment count) of a raw RFC822 message."""
     msg = message_from_bytes(raw, policy=policy.default)
     sender = str(msg.get("From", "") or "")
     subject = str(msg.get("Subject", "") or "")
-    plain = rich = ""
+    plain = rich = markup = ""
+    attachments = 0
     try:
         part = msg.get_body(preferencelist=("plain",))
         if part is not None:
             plain = part.get_content().strip()
         part = msg.get_body(preferencelist=("html",))
         if part is not None:
-            rich = html_to_text(part.get_content())
+            markup = part.get_content()
+            rich = html_to_text(markup)
+        attachments = sum(1 for _ in msg.iter_attachments())
     except Exception:
         plain = raw.decode("utf-8", "replace")
-    return sender, subject, plain, rich
+    return sender, subject, plain, rich, markup, attachments
 
 
 def _read_dns_name(data, offset):
@@ -325,6 +331,9 @@ class Store:
                 id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipients TEXT NOT NULL,
                 subject TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '',
                 provider_id TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS forwards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL DEFAULT 1,
+                note TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL);
             """
         )
         self.add_column("mailboxes", "scenario_id", "INTEGER")
@@ -332,6 +341,7 @@ class Store:
         for table in ("mailboxes", "mails", "sent_mails"):
             self.add_column(table, "deleted_at", "REAL")
         self.add_column("mails", "read_at", "REAL")
+        self.add_column("sent_mails", "kind", "TEXT NOT NULL DEFAULT 'send'")
         self.execute(
             "INSERT OR IGNORE INTO scenarios (key, name, created_at) VALUES (?, '默认场景', ?)",
             (DEFAULT_SCENARIO, time.time()),
@@ -652,6 +662,52 @@ class ApiHandler(BaseHTTPRequestHandler):
         store.execute("DELETE FROM scenario_domains WHERE domain_id = ?", (domain_id,))
         self.send_json(200, {"id": domain_id})
 
+    def get_forwards(self, params, item=None):
+        rows = self.app.store.query("SELECT * FROM forwards ORDER BY id")
+        for row in rows:
+            row["enabled"] = bool(row["enabled"])
+        cfg = self.app.cfg
+        self.send_json(
+            200,
+            {"configured": bool(cfg.resend_api_key), "hourly_limit": cfg.forward_hourly_limit, "forwards": rows},
+        )
+
+    def post_forwards(self, params, item=None):
+        store = self.app.store
+        if item:
+            raise LookupError(item)
+        address = str(params.get("address", "")).strip().lower()
+        if len(address) > 254 or not _EMAIL.fullmatch(address):
+            raise ValueError("邮箱地址格式不正确：%s" % address)
+        if address.rpartition("@")[2] in store.domain_names():
+            raise ValueError("不能转发到本系统自己的域名：%s" % address)
+        if len(store.query("SELECT id FROM forwards")) >= MAX_FORWARDS:
+            raise ValueError("转发邮箱最多 %d 个" % MAX_FORWARDS)
+        try:
+            new_id = store.insert(
+                "INSERT INTO forwards (address, enabled, note, created_at) VALUES (?, ?, ?, ?)",
+                (address, int(bool(params.get("enabled", True))), str(params.get("note", "")).strip(), time.time()),
+            )
+        except sqlite3.IntegrityError:
+            raise ValueError("转发邮箱已存在：%s" % address)
+        self.send_json(200, {"id": new_id, "address": address})
+
+    def put_forwards(self, params, item=None):
+        store, forward_id = self.app.store, int(item or 0)
+        rows = store.query("SELECT enabled, note FROM forwards WHERE id = ?", (forward_id,))
+        if not rows:
+            raise LookupError(item)
+        enabled = int(bool(params.get("enabled", rows[0]["enabled"])))
+        note = str(params.get("note", rows[0]["note"])).strip()
+        store.execute("UPDATE forwards SET enabled = ?, note = ? WHERE id = ?", (enabled, note, forward_id))
+        self.send_json(200, {"id": forward_id})
+
+    def delete_forwards(self, params, item=None):
+        store, forward_id = self.app.store, int(item or 0)
+        if not store.execute("DELETE FROM forwards WHERE id = ?", (forward_id,)):
+            raise LookupError(item)
+        self.send_json(200, {"id": forward_id})
+
     def api_mailbox(self, params, item=None):
         store = self.app.store
         key = str(params.get("scenario", "")).strip().lower() or DEFAULT_SCENARIO
@@ -869,7 +925,7 @@ class ApiHandler(BaseHTTPRequestHandler):
     def get_sent(self, params, item=None):
         limit = min(max(int(params.get("limit", 50)), 1), 200)
         rows = self.app.store.query(
-            "SELECT id, sender AS 'from', recipients AS 'to', subject, body, status, error, created_at"
+            "SELECT id, sender AS 'from', recipients AS 'to', subject, body, status, error, kind, created_at"
             " FROM sent_mails WHERE deleted_at IS NULL ORDER BY id DESC LIMIT ?",
             (limit,),
         )
@@ -972,10 +1028,67 @@ class MailApp:
         return key
 
     def deliver(self, sender, recipients, raw):
-        header_from, subject, plain, rich = parse_mail(raw)
+        header_from, subject, plain, rich, markup, attachments = parse_mail(raw)
         for address in recipients:
             code = extract_for(self.store.template_for(address), subject, plain, rich)
             self.store.add_mail(address, header_from or sender, subject, plain or rich, rich if plain else "", code)
+        try:
+            self.forward(header_from or sender, recipients, subject, plain or rich, markup, attachments)
+        except Exception as exc:
+            print("forward failed: %r" % exc, flush=True)
+
+    def forward(self, origin, recipients, subject, text, markup, attachments):
+        """Send a copy of a received mail to every enabled forward address through Resend."""
+        cfg, store = self.cfg, self.store
+        if not cfg.resend_api_key:
+            return
+        name, origin = parseaddr(origin)
+        origin = origin.lower()
+        own = store.domain_names()
+        targets = [
+            row["address"]
+            for row in store.query("SELECT address FROM forwards WHERE enabled = 1 ORDER BY id")
+            if row["address"] != origin and row["address"].rpartition("@")[2] not in own
+        ]
+        if not targets:
+            return
+        name = re.sub(r'[\r\n"<>]', "", name or origin).strip()
+        subject = re.sub(r"[\r\n]+", " ", subject).strip() or "(无主题)"
+        if attachments:
+            note = "原邮件含 %d 个附件，未随转发发送" % attachments
+            text = "%s\n\n[%s]" % (text, note)
+            markup = markup and "%s<hr><p>%s</p>" % (markup, note)
+        sql = (
+            "INSERT INTO sent_mails (sender, recipients, subject, body, status, error, provider_id, kind, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, 'forward', ?)"
+        )
+        limit = cfg.forward_hourly_limit
+        for address in recipients:
+            row = (address, ", ".join(targets), subject, text)
+            used = store.query(
+                "SELECT COUNT(*) AS n FROM sent_mails WHERE kind = 'forward' AND created_at >= ?", (time.time() - 3600,)
+            )[0]["n"]
+            if limit > 0 and used >= limit:
+                if used == limit:
+                    error = "已达到每小时转发上限（%d 封），一小时内的后续邮件不再转发" % limit
+                    store.insert(sql, row + ("failed", error, "", time.time()))
+                return
+            payload = {
+                "from": '"%s via Mailbox" <%s>' % (name, address) if name else address,
+                "to": targets,
+                "subject": subject,
+                "text": text or "(正文为空)",
+            }
+            if _EMAIL.fullmatch(origin):
+                payload["reply_to"] = origin
+            if markup.strip():
+                payload["html"] = markup
+            try:
+                provider_id = send_via_resend(cfg, payload)
+            except SendError as exc:
+                store.insert(sql, row + ("failed", str(exc), "", time.time()))
+            else:
+                store.insert(sql, row + ("sent", "", provider_id, time.time()))
 
     async def handle_smtp(self, reader, writer):
         try:

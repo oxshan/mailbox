@@ -15,6 +15,7 @@
 - **邮件模板**：用占位符或正则定义验证码的提取方式，支持字母数字混合等任意格式，可在线测试
 - **域名管理**：在看板里增删、启用、停用域名，立即生效，并可检测 MX 记录是否指向本机
 - **发送邮件**：配置 Resend 后，可以用已添加域名下的任意地址作为发件人发信，并保留发件记录
+- **邮件转发**：在看板里添加转发邮箱并逐个开关，收到的邮件会同时通过 Resend 转发过去
 - **自动清理**：收到和发出的邮件默认保留 24 小时
 
 ## 快速开始
@@ -80,6 +81,7 @@ MAIL_DOMAINS=a.com,b.com API_KEY=你的密钥 python3 server.py
 | `STATIC_DIR` | `frontend/dist` | 看板静态文件目录 |
 | `RETENTION_HOURS` | `24` | 邮件保留时长（小时） |
 | `RESEND_API_KEY` | 空 | Resend 的 API Key。留空则不启用发信 |
+| `FORWARD_HOURLY_LIMIT` | `60` | 每小时最多转发的邮件数，超出的只收不转；`0` 表示不限制 |
 | `PUBLIC_IP` | 自动探测 | 本服务器的公网 IP，用于 MX 检测。留空时启动后向外部服务查询一次 |
 | `MAX_MAIL_BYTES` | `2097152` | 单封邮件大小上限，超过则拒收 |
 
@@ -255,9 +257,27 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 
 成功返回 `{"id": 1, "provider_id": "Resend 返回的邮件 ID"}`。Resend 拒绝或连接失败时返回 `502` 和错误原因，这次尝试也会记入发件记录。
 
-`GET /api/sent`（参数 `limit`，默认 50，上限 200）返回 `{"configured": 是否已配置发信, "mails": [...]}`。每条记录含 `id`、`from`、`to`、`subject`、`body`、`status`（`sent` 或 `failed`）、`error`、`created_at`。
+`GET /api/sent`（参数 `limit`，默认 50，上限 200）返回 `{"configured": 是否已配置发信, "mails": [...]}`。每条记录含 `id`、`from`、`to`、`subject`、`body`、`status`（`sent` 或 `failed`）、`error`、`kind`（`send` 手动发送，`forward` 自动转发）、`created_at`。
 
 `sent` 表示 Resend 已接受这封邮件，不代表已送达收件人。
+
+### 邮件转发
+
+配置 `RESEND_API_KEY` 后，每收到一封邮件，都会给所有已开启的转发邮箱发一份。转发在入库之后进行，失败不影响收信。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/forwards` | 返回 `{"configured": 是否已配置发信, "hourly_limit": 每小时上限, "forwards": [...]}` |
+| POST | `/api/forwards` | 添加，请求体 `address`（必填）、`note`、`enabled`，返回 `{"id", "address"}`；最多 20 个 |
+| PUT | `/api/forwards/{id}` | 修改 `enabled` 或 `note`，地址本身不可改 |
+| DELETE | `/api/forwards/{id}` | 删除 |
+
+列表项：`id`、`address`、`enabled`、`note`、`created_at`。
+
+- 转发出去的是一封新邮件：发件地址是收到这封信的邮箱（它的域名需要在 Resend 里验证过），显示名为“原发件人 via Mailbox”，回复地址是原发件人。
+- 正文带纯文本和 HTML；附件不转发，只在正文末尾注明数量。
+- 转发邮箱不能是本系统自己域名下的地址；来自某个转发邮箱的邮件不会再转回给它。
+- 每次转发的结果都记入发件记录（`kind` 为 `forward`）。一小时内达到 `FORWARD_HOURLY_LIMIT` 后记一条失败记录，之后的邮件不再转发，也不再逐封记录。
 
 ### 邮箱与邮件
 
@@ -373,7 +393,7 @@ start.sh / stop.sh       启停脚本
 
 ## 限制
 
-- 发信依赖 Resend，受其额度和使用政策约束；不支持附件。
+- 发信和转发依赖 Resend，受其额度和使用政策约束；不支持附件。
 - 不支持 STARTTLS，发件方以明文投递。
 - 接口和看板是明文 HTTP，API Key 会在网络上明文传输；对公网开放时建议在前面加一层 HTTPS 反向代理。
 - 单封邮件最多 20 个收件人；邮件只保存纯文本正文，不保存附件。

@@ -88,7 +88,9 @@ onMounted(async () => {
                 <td class="time">{{ formatTime(mail.created_at) }}</td>
                 <td><code>{{ mail.from }}</code></td>
                 <td class="clip" :title="mail.to"><code>{{ mail.to }}</code></td>
-                <td class="clip strong" :title="mail.subject">{{ mail.subject }}</td>
+                <td class="clip strong" :title="mail.subject">
+                  <span v-if="mail.kind === 'forward'" class="tag primary">转发</span> {{ mail.subject }}
+                </td>
                 <td>
                   <span class="tag" :class="mail.status === 'sent' ? 'ok' : 'error'">
                     {{ mail.status === 'sent' ? '已发送' : '失败' }}

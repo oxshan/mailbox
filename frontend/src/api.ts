@@ -89,6 +89,15 @@ export interface SentMail {
   body: string
   status: 'sent' | 'failed'
   error: string
+  kind: 'send' | 'forward'
+  created_at: number
+}
+
+export interface Forward {
+  id: number
+  address: string
+  enabled: boolean
+  note: string
   created_at: number
 }
 
@@ -137,6 +146,13 @@ export const api = {
 
   sent: () => request<{ configured: boolean; mails: SentMail[] }>('sent'),
   send: (input: SendInput) => request<{ id: number }>('send', { method: 'POST', body: input }),
+
+  forwards: () => request<{ configured: boolean; hourly_limit: number; forwards: Forward[] }>('forwards'),
+  createForward: (address: string, note: string) =>
+    request<{ id: number }>('forwards', { method: 'POST', body: { address, note } }),
+  updateForward: (id: number, changes: { enabled?: boolean; note?: string }) =>
+    request<{ id: number }>(`forwards/${id}`, { method: 'PUT', body: changes }),
+  deleteForward: (id: number) => request<{ id: number }>(`forwards/${id}`, { method: 'DELETE' }),
 
   scenarios: () => request<{ scenarios: Scenario[] }>('scenarios').then((r) => r.scenarios),
   saveScenario: (input: ScenarioInput, id?: number) =>

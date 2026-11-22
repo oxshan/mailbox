@@ -4,6 +4,7 @@ import { api, clearKey, setKey, UnauthorizedError } from './api'
 import Icon from './Icon.vue'
 import { logout, ui } from './ui'
 import DomainsView from './views/DomainsView.vue'
+import ForwardsView from './views/ForwardsView.vue'
 import MailboxesView from './views/MailboxesView.vue'
 import ScenariosView from './views/ScenariosView.vue'
 import SendView from './views/SendView.vue'
@@ -12,6 +13,7 @@ import TemplatesView from './views/TemplatesView.vue'
 const pages = [
   { key: 'mailboxes', label: '全部邮箱', icon: 'inbox', view: MailboxesView },
   { key: 'send', label: '发送邮件', icon: 'send', view: SendView },
+  { key: 'forwards', label: '邮件转发', icon: 'forward', view: ForwardsView },
   { key: 'scenarios', label: '业务场景', icon: 'layers', view: ScenariosView },
   { key: 'templates', label: '邮件模板', icon: 'file', view: TemplatesView },
   { key: 'domains', label: '域名管理', icon: 'globe', view: DomainsView },
