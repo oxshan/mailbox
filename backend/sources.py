@@ -67,22 +67,40 @@ class Addy:
         self.base = cfg.addy_api_url.rstrip("/")
         self.token, self.collector = source["token"], source["collector"]
         self.domain, self.format = source["alias_domain"], source["alias_format"]
+        # A collector that is a connected mail account is read by logging in, so addy may keep forwarding
+        # to whatever recipient it already has, as long as that mail ends up in the account.
+        self.via_account = bool(source.get("via_account"))
 
     def call(self, method, path, body=None):
         return call(self.label, method, self.base + path, self.token, body)
 
-    def recipient(self, create=False):
-        """The addy recipient that is our collector address, optionally adding it when it is missing."""
-        for row in (self.call("GET", "/recipients") or {}).get("data", []):
-            if str(row.get("email", "")).lower() == self.collector:
-                return row
-        if create:
-            return (self.call("POST", "/recipients", {"email": self.collector}) or {}).get("data")
-        return None
+    def recipients(self):
+        return (self.call("GET", "/recipients") or {}).get("data", [])
+
+    def recipient(self, rows=None):
+        """The addy recipient that is our collector address, or None."""
+        rows = self.recipients() if rows is None else rows
+        return next((row for row in rows if str(row.get("email", "")).lower() == self.collector), None)
 
     def check(self):
         self.call("GET", "/api-token-details")
-        recipient = self.recipient(create=True)
+        rows = self.recipients()
+        recipient = self.recipient(rows)
+        if recipient is None and self.via_account:
+            others = "、".join(str(row.get("email", "")) for row in rows) or "（没有）"
+            message = (
+                "令牌有效。收集地址 %s 是接入的邮箱账号，不需要是 addy 收件人：新别名转发到 addy 的默认收件人 %s，"
+                "请确认这些邮件最终会进到 %s"
+            )
+            return {"status": "ok", "message": message % (self.collector, others, self.collector)}
+        if recipient is None:
+            try:
+                recipient = (self.call("POST", "/recipients", {"email": self.collector}) or {}).get("data")
+            except SourceError as exc:
+                if "already exists" not in str(exc):
+                    raise
+                message = "令牌有效，但 %s 已是另一个 addy 账户的收件人，addy 不允许它再加到这个账户，请换一个收集地址"
+                return {"status": "error", "message": message % self.collector}
         if not recipient:
             return {"status": "error", "message": "addy 没有返回收件人信息"}
         if not recipient.get("email_verified_at"):
@@ -92,12 +110,14 @@ class Addy:
 
     def create(self, description):
         recipient = self.recipient()
-        if not recipient:
+        if not recipient and not self.via_account:
             raise SourceError("收集地址 %s 还不是 addy 的收件人，请先在来源页面检测该来源" % self.collector)
         domain = self.domain or (self.call("GET", "/domain-options") or {}).get("defaultAliasDomain")
         if not domain:
             raise SourceError("addy 没有返回默认别名域名，请在来源里填写别名域名")
-        body = {"domain": domain, "description": description, "recipient_ids": [recipient["id"]]}
+        body = {"domain": domain, "description": description}
+        if recipient:
+            body["recipient_ids"] = [recipient["id"]]
         if self.format:
             body["format"] = self.format
         alias = (self.call("POST", "/aliases", body) or {}).get("data") or {}

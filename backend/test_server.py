@@ -501,6 +501,8 @@ class EndToEndTest(unittest.TestCase):
                 if path == "/addy/recipients" and self.command == "GET":
                     return self.reply(200, {"data": state["recipients"]})
                 if path == "/addy/recipients":
+                    if body["email"] in state.get("taken", ()):
+                        return self.reply(422, {"message": "A recipient with that email already exists."})
                     row = {"id": "rc-%d" % (len(state["recipients"]) + 1), "email": body["email"], "email_verified_at": None}
                     state["recipients"].append(row)
                     return self.reply(201, {"data": row})
@@ -665,6 +667,41 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual(self.api_error("/api/sources/%d/check" % source, method="POST"), (424, "addy.io 返回 401：Unauthenticated."))
         finally:
             self.close_sources(fake)
+
+    def test_addy_collector_cases(self):
+        fake, state = self.fake_sources()
+        store = self.app.store
+        try:
+            state["recipients"].append({"id": "rc-gmail", "email": "me@gmail.com", "email_verified_at": "2026-11-01"})
+            state["taken"] = ["taken@a.test"]
+            add = lambda collector: self.api(
+                "/api/sources",
+                method="POST",
+                body={"kind": "addy", "name": collector, "token": "addy_good_token_123", "collector": collector},
+            )["id"]
+            check = lambda source: self.api("/api/sources/%d/check" % source, method="POST")
+
+            taken = check(add("taken@a.test"))
+            self.assertEqual(taken["status"], "error")
+            self.assertIn("另一个 addy 账户的收件人", taken["message"])
+
+            store.add_account("outlook", "me@outlook.com", "client-1", "rt-good-0")
+            via = add("me@outlook.com")
+            calls = len(state["calls"])
+            result = check(via)
+            self.assertEqual(result["status"], "ok")
+            self.assertIn("me@gmail.com", result["message"])
+            self.assertNotIn("POST", [call[0] for call in state["calls"][calls:]])
+            box = self.new_box(source=via)
+            created = [call for call in state["calls"] if call[:2] == ("POST", "/addy/aliases")][-1]
+            self.assertNotIn("recipient_ids", created[2])
+            self.assertEqual(box["source_kind"], "addy")
+        finally:
+            fake.shutdown()
+            fake.server_close()
+            store.execute("DELETE FROM mailboxes WHERE source_id IS NOT NULL OR account_id IS NOT NULL")
+            for table in ("sources", "accounts", "scenario_sources"):
+                store.execute("DELETE FROM %s" % table)
 
     def test_duck_source(self):
         fake, state = self.fake_sources()

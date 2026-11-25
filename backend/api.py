@@ -164,6 +164,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         store.execute("DELETE FROM scenario_domains WHERE domain_id = ?", (domain_id,))
         self.send_json(200, {"id": domain_id})
 
+    def source_client(self, source):
+        """The API client of a source, told whether its collector is a connected mail account."""
+        via_account = bool(self.app.store.query("SELECT 1 FROM accounts WHERE address = ?", (source["collector"],)))
+        return sources.client(self.app.cfg, dict(source, via_account=via_account))
+
     def source_view(self, row):
         view = {key: value for key, value in row.items() if key != "token"}
         view["token_mask"] = mask(row["token"])
@@ -222,7 +227,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             source = store.source(int(item)) if item.isdigit() else None
             if not source or action != "check":
                 raise LookupError(item)
-            return self.send_json(200, sources.client(self.app.cfg, source).check())
+            return self.send_json(200, self.source_client(source).check())
         kind = str(params.get("kind", "")).strip().lower()
         if kind not in sources.KINDS:
             raise ValueError("来源类型只能是：%s" % "、".join(sorted(sources.KINDS)))
@@ -717,7 +722,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         scenario = rows[0]
         source = self.pick_source(scenario["id"], params)
         if source:
-            alias = sources.client(self.app.cfg, source).create("mailbox：%s" % scenario["name"])
+            alias = self.source_client(source).create("mailbox：%s" % scenario["name"])
             address = alias["address"]
             if not store.add_mailbox(address, scenario["id"], source["id"], alias["remote_id"]):
                 store.execute(
@@ -742,7 +747,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not box:
             raise LookupError(item)
         source = store.source(box["source_id"]) if box["source_id"] is not None else None
-        return box, (sources.client(self.app.cfg, source) if source else None)
+        return box, (self.source_client(source) if source else None)
 
     def remote_id(self, box, client):
         """The id of an alias at its source, looked up there when the alias was not made through us."""
