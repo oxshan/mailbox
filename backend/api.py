@@ -310,6 +310,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         store = self.app.store
         if item == "authorize" and action is None:
             return self.authorize(params)
+        if item == "callback" and action is None:
+            return self.authorize_callback(params)
         if item is not None:
             account = store.account(int(item)) if item.isdigit() else None
             if not account or action != "sync":
@@ -357,7 +359,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             )
         key = str(params["id"])
         pending = app.authorizations.get(key)
-        if not pending:
+        if not pending or "device_code" not in pending:
             raise ValueError("这次授权已过期，请重新开始")
         try:
             result = accounts.finish_authorization(app.cfg, pending["device_code"])
@@ -367,17 +369,48 @@ class ApiHandler(BaseHTTPRequestHandler):
         if result is None:
             return self.send_json(200, {"status": "pending"})
         app.authorizations.pop(key, None)
-        address, refresh_token = result
+        self.send_json(200, self.save_signed_in(*result))
+
+    def authorize_callback(self, params):
+        """Add an Outlook account through Microsoft's sign-in page.
+
+        Without `callback_url`: return a sign-in link. With it: the address the browser ended up at after
+        signing in, pasted from its address bar, whose code is exchanged for the account's tokens.
+        """
+        app = self.app
+        now = time.time()
+        for key in [key for key, pending in app.authorizations.items() if pending["expires_at"] < now]:
+            del app.authorizations[key]
+        if not str(params.get("callback_url", "")).strip():
+            link, state, verifier = accounts.authorization_link(app.cfg)
+            expires_in = 600
+            app.authorizations[state] = {"verifier": verifier, "expires_at": now + expires_in}
+            return self.send_json(
+                200, {"url": link, "redirect_uri": app.cfg.ms_redirect_uri, "expires_in": expires_in}
+            )
+        callback = accounts.callback_params(params["callback_url"])
+        if callback.get("error"):
+            detail = callback.get("error_description") or callback["error"]
+            raise ValueError("微软登录：%s" % detail.splitlines()[0][:200])
+        if not callback.get("code"):
+            raise ValueError("这个地址里没有授权码，请复制登录后浏览器地址栏里的完整地址")
+        pending = app.authorizations.pop(callback.get("state", ""), None)
+        if not pending or "verifier" not in pending:
+            raise ValueError("这个地址不属于一次进行中的授权，或已超过 10 分钟，请重新获取登录链接")
+        self.send_json(200, self.save_signed_in(*accounts.redeem_code(app.cfg, callback["code"], pending["verifier"])))
+
+    def save_signed_in(self, address, refresh_token):
+        """Add the account someone just signed in to, or renew its token when it is already here."""
+        store, client_id = self.app.store, self.app.cfg.ms_client_id
         if address.rpartition("@")[2] in store.domain_names():
             raise ValueError("自有域名下的邮箱不需要接入：%s" % address)
-        client_id = app.cfg.ms_client_id
         added = bool(store.add_account("outlook", address, client_id, refresh_token))
         if not added:
             store.execute(
                 "UPDATE accounts SET client_id = ?, refresh_token = ?, status = '', error = '' WHERE address = ?",
                 (client_id, refresh_token, address),
             )
-        self.send_json(200, {"status": "done", "address": address, "added": added})
+        return {"status": "done", "address": address, "added": added}
 
     def put_accounts(self, params, item=None, action=None):
         store = self.app.store

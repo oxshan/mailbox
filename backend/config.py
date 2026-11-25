@@ -32,6 +32,10 @@ class Config:
         self.ms_device_url = env("MS_DEVICE_URL", "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode")
         # Thunderbird's public application id, which Microsoft lets sign in with a device code.
         self.ms_client_id = env("MS_CLIENT_ID", "9e5f94bc-e8a4-4e73-b8be-63364c29d753")
+        self.ms_authorize_url = env("MS_AUTHORIZE_URL", "https://login.microsoftonline.com/common/oauth2/v2.0/authorize")
+        # Where Microsoft sends the browser after signing in. Nothing needs to answer there: the user copies
+        # the address from the browser's address bar. A desktop app such as Thunderbird may use any localhost port.
+        self.ms_redirect_uri = env("MS_REDIRECT_URI", "http://localhost:8080")
         self.outlook_imap_host = env("OUTLOOK_IMAP_HOST", "outlook.live.com")
         self.account_sync_minutes = float(env("ACCOUNT_SYNC_MINUTES", "5"))
         self.account_sync_min_seconds = 10

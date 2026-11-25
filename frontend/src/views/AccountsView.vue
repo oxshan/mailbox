@@ -42,12 +42,46 @@ async function authorize() {
   authorizing.value = true
   try {
     stopAuthorization()
+    link.value = null
     authorization.value = await api.startAuthorization()
     pollTimer = window.setTimeout(pollAuthorization, authorization.value.interval * 1000)
   } catch (err) {
     fail(err, '发起授权失败')
   } finally {
     authorizing.value = false
+  }
+}
+
+const link = ref<{ url: string; redirect_uri: string } | null>(null)
+const callbackUrl = ref('')
+const linking = ref(false)
+
+async function openLink() {
+  linking.value = true
+  try {
+    stopAuthorization()
+    link.value = await api.authorizationLink()
+    callbackUrl.value = ''
+    window.open(link.value.url, '_blank', 'noopener')
+  } catch (err) {
+    fail(err, '获取登录链接失败')
+  } finally {
+    linking.value = false
+  }
+}
+
+async function submitCallback() {
+  if (!callbackUrl.value.trim()) return
+  linking.value = true
+  try {
+    const result = await api.submitCallback(callbackUrl.value)
+    link.value = null
+    notify(result.added ? `已添加 ${result.address}` : `${result.address} 已存在，令牌已更新`)
+    await load()
+  } catch (err) {
+    fail(err, '授权失败')
+  } finally {
+    linking.value = false
   }
 }
 
@@ -132,10 +166,36 @@ onBeforeUnmount(stopAuthorization)
   <header class="page-head">
     <h1>邮箱账号</h1>
     <span class="muted">接入 Outlook / Hotmail 邮箱，由本系统登录读取，在“全部邮箱”里统一查看</span>
-    <button class="btn primary push" type="button" :disabled="authorizing" @click="authorize">
-      <Icon name="plus" :size="14" />{{ authorizing ? '请稍候…' : '授权添加' }}
+    <button class="btn push" type="button" :disabled="authorizing" @click="authorize">
+      {{ authorizing ? '请稍候…' : '设备码授权' }}
+    </button>
+    <button class="btn primary" type="button" :disabled="linking" @click="openLink">
+      <Icon name="plus" :size="14" />登录授权
     </button>
   </header>
+
+  <form v-if="link" class="notice" @submit.prevent="submitCallback">
+    <p>
+      1. 已在新标签页打开微软登录页（没有打开的话<a :href="link.url" target="_blank" rel="noopener">点这里</a>），登录要接入的
+      Outlook 并同意授权。页面上显示的应用名是 Thunderbird，这是正常的。
+    </p>
+    <p>
+      2. 同意后浏览器会跳到 <code>{{ link.redirect_uri }}</code> 并显示“无法访问此网站”，这是正常的。把地址栏里的完整地址复制下来，粘贴到下面：
+    </p>
+    <p class="callback">
+      <input
+        v-model="callbackUrl"
+        required
+        spellcheck="false"
+        autocomplete="off"
+        :placeholder="`${link.redirect_uri}/?code=…&state=…`"
+        aria-label="回调地址"
+      />
+      <button class="btn primary" type="submit" :disabled="linking">{{ linking ? '提交中…' : '完成授权' }}</button>
+      <button class="btn" type="button" @click="link = null">取消</button>
+    </p>
+    <p class="muted">登录链接 10 分钟内有效，每个链接只能用一次。</p>
+  </form>
 
   <div v-if="authorization" class="notice" role="status">
     <p>

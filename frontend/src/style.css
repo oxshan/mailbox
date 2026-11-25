@@ -1286,3 +1286,14 @@ fieldset.field > legend {
   width: auto;
   vertical-align: middle;
 }
+
+.notice .callback {
+  display: flex;
+  gap: 8px;
+}
+
+.notice .callback input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+}

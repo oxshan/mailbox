@@ -248,6 +248,16 @@ export const api = {
       method: 'POST',
       body: { id },
     }),
+  authorizationLink: () =>
+    request<{ url: string; redirect_uri: string; expires_in: number }>('accounts/callback', {
+      method: 'POST',
+      body: {},
+    }),
+  submitCallback: (callback_url: string) =>
+    request<{ status: 'done'; address: string; added: boolean }>('accounts/callback', {
+      method: 'POST',
+      body: { callback_url },
+    }),
   syncAccount: (id: number) => request<AccountSync>(`accounts/${id}/sync`, { method: 'POST' }),
 
   scenarios: () => request<{ scenarios: Scenario[] }>('scenarios').then((r) => r.scenarios),

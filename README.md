@@ -86,6 +86,7 @@ MAIL_DOMAINS=a.com,b.com API_KEY=你的密钥 python3 server.py
 | `RESEND_API_KEY` | 空 | Resend 的 API Key。留空则不启用发信 |
 | `FORWARD_HOURLY_LIMIT` | `60` | 每小时最多转发的邮件数，超出的只收不转；`0` 表示不限制 |
 | `MS_CLIENT_ID` | Thunderbird 的公开编号 | 授权添加 Outlook 账号时使用的微软应用编号。换成自己注册的应用时，要在应用里打开“允许公共客户端流” |
+| `MS_REDIRECT_URI` | `http://localhost:8080` | 登录授权后微软把浏览器跳转到的地址，不需要真的能访问。换成自己的应用时要和应用里登记的重定向地址一致 |
 | `ACCOUNT_SYNC_MINUTES` | `5` | 每隔多少分钟读取一次接入的邮箱账号；`0` 表示不定时读取 |
 | `PUBLIC_IP` | 自动探测 | 本服务器的公网 IP，用于 MX 检测。留空时启动后向外部服务查询一次 |
 | `MAX_MAIL_BYTES` | `2097152` | 单封邮件大小上限，超过则拒收 |
@@ -154,7 +155,9 @@ Docker 方式下，`.env` 里的 `SMTP_PORT` 和 `HTTP_PORT` 指的是宿主机�
 
 和上面两类不同，Outlook 邮箱的邮件不会送到本系统，而是由本系统登录到邮箱里去读。它只用于统一查看，不参与“生成邮箱”，也不需要关联业务场景。
 
-- **授权添加**：在“邮箱账号”页点“授权添加”，页面给出一个网址和一个代码；在浏览器里打开网址、输入代码、登录 Outlook 并同意，账号就会自动出现。授权用的应用编号由 `MS_CLIENT_ID` 决定，默认是 Thunderbird 邮件客户端的公开编号，所以授权页面上显示的应用名是 Thunderbird。对已接入的账号再授权一次会更新它的令牌。
+- **登录授权**：在“邮箱账号”页点“登录授权”，会打开微软登录页；登录 Outlook 并同意后，浏览器跳到 `MS_REDIRECT_URI`（默认 `http://localhost:8080`）并显示无法访问，这是正常的。把地址栏里的完整地址粘贴回页面、点“完成授权”，账号就会添加。登录链接 10 分钟内有效，只能用一次。
+- **设备码授权**：点“设备码授权”，页面给出一个网址和一个代码；在任意设备的浏览器里打开网址、输入代码、登录并同意，账号会自动出现，不需要粘贴地址。
+- 两种授权用的应用编号由 `MS_CLIENT_ID` 决定，默认是 Thunderbird 邮件客户端的公开编号，所以授权页面上显示的应用名是 Thunderbird。对已接入的账号再授权一次会更新它的令牌。
 - **用已有令牌导入**：在同一页粘贴账号，每行一个，格式 `邮箱----密码----client_id----refresh_token`。密码不会被使用和保存；登录靠 `client_id` 和 `refresh_token`，两者必须来自同一次授权。
 - **读取**：读收件箱和垃圾箱各最近 20 封。优先用 Microsoft Graph，令牌没有 Graph 权限时改用 IMAP。读取时机有三个：每 `ACCOUNT_SYNC_MINUTES` 分钟一次；在后台打开这个邮箱时；查询它的验证码时（两次读取至少间隔 10 秒）。
 - **令牌**：每次读取微软可能换发新的 `refresh_token`，系统会自动保存。定时读取同时避免了令牌因长期不用而过期。改过邮箱密码后令牌失效，需要重新授权并在编辑里换成新的。
@@ -410,6 +413,7 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 | POST | `/api/accounts` | 添加。单个：`address`、`client_id`、`refresh_token`、`note`；批量：`text`，每行 `邮箱----密码----client_id----refresh_token`。返回 `{"added": [...], "skipped": [...]}`，已存在的账号被跳过 |
 | PUT | `/api/accounts/{id}` | 修改 `enabled`、`note`、`client_id`、`refresh_token`；后两项留空表示不改 |
 | DELETE | `/api/accounts/{id}` | 删除账号和已读取的邮件；被某个来源用作收集地址时拒绝 |
+| POST | `/api/accounts/callback` | 登录授权。不带参数：返回 `{"url", "redirect_uri", "expires_in"}`，`url` 是微软登录链接；带 `callback_url`（登录后浏览器地址栏里的完整地址）：换取令牌并添加账号，返回同下面的 `done` 结果。地址有误或链接过期返回 `400`，微软拒绝返回 `424` |
 | POST | `/api/accounts/authorize` | 授权添加。不带参数：发起一次授权，返回 `{"id", "user_code", "verification_uri", "expires_in", "interval"}`；带 `id`：查询结果，返回 `{"status": "pending"}`，或 `{"status": "done", "address", "added"}`（`added` 为 `false` 表示账号已存在、令牌已更新）。被拒绝或超时返回 `424` |
 | POST | `/api/accounts/{id}/sync` | 立即读取，返回 `{"fetched", "new", "channel"}`；失败返回 `424` |
 

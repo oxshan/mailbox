@@ -5,8 +5,10 @@ junk folder are read through Microsoft Graph, or over IMAP when the token was no
 """
 import base64
 import calendar
+import hashlib
 import imaplib
 import json
+import secrets
 import time
 import urllib.error
 import urllib.parse
@@ -100,6 +102,48 @@ def finish_authorization(cfg, device_code):
     reply = _form(cfg.ms_token_url, form)
     if reply.get("error") in ("authorization_pending", "slow_down"):
         return None
+    return _signed_in(reply)
+
+
+def authorization_link(cfg):
+    """A sign-in link for the code flow with PKCE. Returns (link, state, code verifier)."""
+    state, verifier = secrets.token_urlsafe(16), secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    query = {
+        "client_id": cfg.ms_client_id,
+        "response_type": "code",
+        "redirect_uri": cfg.ms_redirect_uri,
+        "response_mode": "query",
+        "scope": AUTHORIZE_SCOPE,
+        "state": state,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "prompt": "select_account",
+    }
+    return "%s?%s" % (cfg.ms_authorize_url, urllib.parse.urlencode(query)), state, verifier
+
+
+def callback_params(callback_url):
+    """The query of the address the browser was sent to after signing in, as a dict of single values."""
+    query = urllib.parse.urlparse(str(callback_url).strip()).query or str(callback_url).strip().lstrip("?")
+    return {key: values[0] for key, values in urllib.parse.parse_qs(query).items()}
+
+
+def redeem_code(cfg, code, verifier):
+    """Exchange the code from a callback address. Returns (address, refresh token)."""
+    form = {
+        "client_id": cfg.ms_client_id,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": cfg.ms_redirect_uri,
+        "code_verifier": verifier,
+        "scope": AUTHORIZE_SCOPE,
+    }
+    return _signed_in(_form(cfg.ms_token_url, form))
+
+
+def _signed_in(reply):
+    """The account a successful token reply is for: (address from its id token, refresh token)."""
     if reply.get("error"):
         raise _refused(reply)
     if not reply.get("refresh_token"):

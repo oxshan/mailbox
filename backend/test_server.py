@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import os
 import smtplib
@@ -795,6 +796,14 @@ class EndToEndTest(unittest.TestCase):
                     state["device_request"] = form
                     reply = {"device_code": "dc-1", "user_code": "ABCD1234", "expires_in": 900, "interval": 1}
                     return self.reply(200, dict(reply, verification_uri="https://login.microsoft.com/device"))
+                if form.get("grant_type") == ["authorization_code"]:
+                    state["code_request"] = form
+                    if form["code"] != ["code-1"]:
+                        detail = "AADSTS70008: The provided authorization code has expired.\r\nTrace ID: abc"
+                        return self.reply(400, {"error": "invalid_grant", "error_description": detail})
+                    claims = base64.urlsafe_b64encode(json.dumps({"preferred_username": "Link@Outlook.com"}).encode())
+                    id_token = "h.%s.sig" % claims.decode().rstrip("=")
+                    return self.reply(200, {"refresh_token": "rt-good-link", "id_token": id_token})
                 if "device_code" in form:
                     if form["device_code"] != ["dc-1"] or state["device"] == "declined":
                         detail = "AADSTS70016: The user declined.\r\nTrace ID: abc"
@@ -875,6 +884,36 @@ class EndToEndTest(unittest.TestCase):
             state["device"] = "x@a.test"
             own = authorize()
             self.assertIn("自有域名", self.api_error("/api/accounts/authorize", method="POST", body={"id": own["id"]})[1])
+
+            callback = lambda url="": self.api("/api/accounts/callback", method="POST", body={"callback_url": url})
+            callback_error = lambda url: self.api_error("/api/accounts/callback", method="POST", body={"callback_url": url})
+            link = callback()
+            self.assertEqual((link["redirect_uri"], link["expires_in"]), ("http://localhost:8080", 600))
+            query = parse_qs(link["url"].split("?", 1)[1])
+            self.assertTrue(link["url"].startswith(self.app.cfg.ms_authorize_url + "?"))
+            self.assertEqual(query["client_id"], [self.app.cfg.ms_client_id])
+            self.assertEqual((query["response_type"], query["code_challenge_method"]), (["code"], ["S256"]))
+            self.assertEqual(query["redirect_uri"], ["http://localhost:8080"])
+            back = "http://localhost:8080/?code=%s&state=%s"
+            self.assertIn("没有授权码", callback_error("http://localhost:8080/?state=" + query["state"][0])[1])
+            self.assertIn("进行中的授权", callback_error(back % ("code-1", "someone-else"))[1])
+            denied = callback_error("http://localhost:8080/?error=access_denied&error_description=The+user+declined.")
+            self.assertEqual(denied, (400, "微软登录：The user declined."))
+            status, message = callback_error(back % ("code-old", query["state"][0]))
+            self.assertEqual((status, message), (424, "微软登录：AADSTS70008: The provided authorization code has expired."))
+            self.assertIn("进行中的授权", callback_error(back % ("code-1", query["state"][0]))[1])
+
+            fresh = parse_qs(callback()["url"].split("?", 1)[1])
+            done = callback("  " + back % ("code-1", fresh["state"][0]) + "#  ")
+            self.assertEqual(done, {"status": "done", "address": "link@outlook.com", "added": True})
+            sent = state["code_request"]
+            self.assertEqual(sent["redirect_uri"], ["http://localhost:8080"])
+            verifier = sent["code_verifier"][0]
+            challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+            self.assertEqual([challenge], fresh["code_challenge"])
+            account = store.query("SELECT client_id, refresh_token FROM accounts WHERE address = 'link@outlook.com'")[0]
+            self.assertEqual(account, {"client_id": self.app.cfg.ms_client_id, "refresh_token": "rt-good-link"})
+            self.assertEqual(self.app.authorizations, {})
         finally:
             fake.shutdown()
             fake.server_close()
