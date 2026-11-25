@@ -8,7 +8,7 @@ RUN yarn build
 FROM python:3.12-alpine
 RUN adduser -D -u 10001 mailbox && mkdir /data && chown mailbox:mailbox /data
 WORKDIR /app
-COPY backend/server.py backend/server.py
+COPY backend/*.py backend/
 COPY --from=frontend /build/dist frontend/dist
 ENV PYTHONUNBUFFERED=1 \
     DATA_DIR=/data \

@@ -1,28 +1,30 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { api, type Domain, type Scenario, type ScenarioInput, type Template } from '../api'
+import { api, type Domain, type Scenario, type ScenarioInput, type Source, type Template } from '../api'
 import Icon from '../Icon.vue'
 import { copy, fail, formatTime, notify } from '../ui'
 
 const DEFAULT_KEY = 'default'
-const blank = (): ScenarioInput => ({ name: '', key: '', domain_ids: [], template_id: null })
+const blank = (): ScenarioInput => ({ name: '', key: '', domain_ids: [], source_ids: [], template_id: null })
 
 const scenarios = ref<Scenario[]>([])
 const templates = ref<Template[]>([])
 const domains = ref<Domain[]>([])
+const sources = ref<Source[]>([])
 const form = reactive<ScenarioInput>(blank())
 const editing = ref<Scenario | null>(null)
 const saving = ref(false)
 
 const isDefault = computed(() => editing.value?.key === DEFAULT_KEY)
-const usage = computed(() => `POST /api/mailbox?scenario=${form.key || '<标识>'}`)
+const usage = computed(() => `POST /api/mailboxes {"scenario": "${form.key || '<标识>'}"}`)
 
 async function load() {
   try {
-    ;[scenarios.value, templates.value, domains.value] = await Promise.all([
+    ;[scenarios.value, templates.value, domains.value, sources.value] = await Promise.all([
       api.scenarios(),
       api.templates(),
       api.domains(),
+      api.sources(),
     ])
   } catch (err) {
     fail(err, '加载失败')
@@ -40,6 +42,7 @@ function edit(item: Scenario) {
     name: item.name,
     key: item.key,
     domain_ids: [...item.domain_ids],
+    source_ids: [...item.source_ids],
     template_id: item.template_id,
   })
 }
@@ -47,7 +50,7 @@ function edit(item: Scenario) {
 async function save() {
   saving.value = true
   try {
-    await api.saveScenario({ ...form, domain_ids: [...form.domain_ids] }, editing.value?.id)
+    await api.saveScenario({ ...form, domain_ids: [...form.domain_ids], source_ids: [...form.source_ids] }, editing.value?.id)
     notify(editing.value ? '已保存，该场景下的邮件已按新模板重新解析' : '已创建业务场景')
     reset()
     await load()
@@ -77,7 +80,7 @@ onMounted(load)
 <template>
   <header class="page-head">
     <h1>业务场景</h1>
-    <span class="muted">生成邮箱时指定场景，场景决定使用的域名和验证码解析模板</span>
+    <span class="muted">生成邮箱时指定场景，场景决定使用的域名、外部来源和验证码解析模板</span>
   </header>
 
   <div class="manage">
@@ -89,6 +92,7 @@ onMounted(load)
               <th>名称</th>
               <th>标识</th>
               <th>域名</th>
+              <th>外部来源</th>
               <th>邮件模板</th>
               <th class="num">邮箱数</th>
               <th>创建时间</th>
@@ -104,6 +108,10 @@ onMounted(load)
                   {{ item.domains.map((name) => `@${name}`).join(' ') }}
                 </code>
                 <span v-else class="muted">全部已启用域名</span>
+              </td>
+              <td class="clip">
+                <span v-for="name in item.sources" :key="name" class="tag primary">{{ name }}</span>
+                <span v-if="!item.sources.length" class="muted">不使用</span>
               </td>
               <td>
                 <span v-if="item.template_name" class="tag primary">{{ item.template_name }}</span>
@@ -164,6 +172,22 @@ onMounted(load)
           </div>
           <p class="hint">
             生成邮箱时从勾选的域名里随机选一个；都不勾选表示使用全部已启用的域名。<a href="#/domains">管理域名</a>
+          </p>
+        </fieldset>
+        <fieldset v-if="sources.length" class="field">
+          <legend class="label">外部来源</legend>
+          <div class="checks">
+            <label v-for="item in sources" :key="item.id" class="check" :class="{ off: !item.enabled }">
+              <input v-model="form.source_ids" type="checkbox" :value="item.id" />
+              <code>{{ item.name }}</code>
+              <span v-if="!item.enabled" class="tag">已停用</span>
+            </label>
+          </div>
+          <p class="hint">
+            都不勾选：只用自有域名，除非生成时指定来源。勾选后：只能用勾选的来源，生成时在这些来源和上面勾选的域名里随机选一个。<a
+              href="#/sources"
+              >管理来源</a
+            >
           </p>
         </fieldset>
         <div class="field">

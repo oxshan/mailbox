@@ -1,20 +1,23 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { api, type Domain, type Mail, type Mailbox, type Scenario, type Stats } from '../api'
+import { api, type Domain, type Mail, type Mailbox, type Scenario, type Source, type Stats } from '../api'
 import Icon from '../Icon.vue'
-import { copy, fail, formatTime } from '../ui'
+import { copy, fail, formatTime, notify } from '../ui'
 
 const REFRESH_MS = 5000
 
 const stats = ref<Stats | null>(null)
 const scenarios = ref<Scenario[]>([])
 const domains = ref<Domain[]>([])
+const sources = ref<Source[]>([])
 const mailboxes = ref<Mailbox[]>([])
 const mails = ref<Mail[]>([])
 const selected = ref('')
 const expanded = ref<number | null>(null)
 const filter = ref('')
 const scenario = ref('default')
+const source = ref<number | null>(null)
+const headersOf = ref<number | null>(null)
 const creating = ref(false)
 const refreshing = ref(false)
 
@@ -30,10 +33,11 @@ const statCards = computed(() => [
 const visibleBoxes = computed(() => {
   const keyword = filter.value.trim().toLowerCase()
   if (!keyword) return mailboxes.value
-  return mailboxes.value.filter(
-    (box) => box.address.includes(keyword) || (box.scenario_name ?? '').toLowerCase().includes(keyword),
+  return mailboxes.value.filter((box) =>
+    [box.address, box.scenario_name ?? '', box.source_name ?? ''].some((text) => text.toLowerCase().includes(keyword)),
   )
 })
+const current = computed(() => mailboxes.value.find((box) => box.address === selected.value) ?? null)
 
 async function refresh() {
   refreshing.value = true
@@ -56,7 +60,7 @@ async function refresh() {
 async function createMailbox() {
   creating.value = true
   try {
-    const box = await api.createMailbox(scenario.value)
+    const box = await api.createMailbox(scenario.value, source.value)
     filter.value = ''
     selected.value = box.address
     await copy(box.address, `已生成并复制 ${box.address}`)
@@ -64,6 +68,34 @@ async function createMailbox() {
     fail(err, '生成失败')
   } finally {
     creating.value = false
+  }
+}
+
+async function setActive(box: Mailbox) {
+  try {
+    const { synced } = await api.setMailboxActive(box.address, !box.active)
+    const where = synced ? `，已同步到 ${box.source_name}` : box.source === null ? '' : '（仅本系统，来源不支持远端停用）'
+    notify(box.active ? `已停用，不再接收它的邮件${where}` : `已启用${where}`)
+    await refresh()
+  } catch (err) {
+    fail(err, '操作失败')
+  }
+}
+
+async function remove(box: Mailbox) {
+  const note = {
+    domain: '之后再有邮件发到这个地址，它会重新出现；想拒收请改用停用。',
+    addy: '同时会在 addy.io 删除这个别名。',
+    duck: 'Duck 不支持删除，这个地址在 Duck 仍然有效，再来信会重新出现；想拒收请改用停用。',
+  }[box.source_kind]
+  if (!window.confirm(`确定删除邮箱 ${box.address} 吗？${note}`)) return
+  try {
+    await api.deleteMailbox(box.address)
+    selected.value = ''
+    notify('已删除')
+    await refresh()
+  } catch (err) {
+    fail(err, '删除失败')
   }
 }
 
@@ -80,6 +112,7 @@ async function markRead(mail: Mail) {
 
 function toggle(mail: Mail) {
   expanded.value = expanded.value === mail.id ? null : mail.id
+  headersOf.value = null
   markRead(mail)
 }
 
@@ -96,7 +129,7 @@ watch(selected, () => {
 
 onMounted(async () => {
   try {
-    ;[scenarios.value, domains.value] = await Promise.all([api.scenarios(), api.domains()])
+    ;[scenarios.value, domains.value, sources.value] = await Promise.all([api.scenarios(), api.domains(), api.sources()])
   } catch (err) {
     fail(err, '加载失败')
   }
@@ -137,6 +170,11 @@ onBeforeUnmount(() => window.clearInterval(timer))
         <select id="scenario" v-model="scenario" title="按业务场景生成邮箱">
           <option v-for="item in scenarios" :key="item.id" :value="item.key">{{ item.name }}</option>
         </select>
+        <label class="sr-only" for="source">来源</label>
+        <select id="source" v-model="source" title="邮箱来源">
+          <option :value="null">按场景</option>
+          <option v-for="item in sources" :key="item.id" :value="item.id" :disabled="!item.enabled">{{ item.name }}</option>
+        </select>
         <button class="btn primary" type="button" :disabled="creating" @click="createMailbox">
           <Icon name="plus" />{{ creating ? '生成中' : '生成邮箱' }}
         </button>
@@ -165,7 +203,11 @@ onBeforeUnmount(() => window.clearInterval(timer))
             <span class="box-name mono">{{ box.address }}</span>
             <span class="box-count">共 {{ box.mail_count }} 封</span>
             <span class="box-meta">
-              <span class="tag">{{ box.scenario_name ?? '默认场景' }}</span>
+              <span>
+                <span class="tag">{{ box.scenario_name ?? '默认场景' }}</span>
+                <span v-if="box.source_name" class="tag primary">{{ box.source_name }}</span>
+                <span v-if="!box.active" class="tag error">已停用</span>
+              </span>
               <time>{{ formatTime(box.last_mail_at ?? box.created_at) }}</time>
             </span>
           </button>
@@ -182,6 +224,20 @@ onBeforeUnmount(() => window.clearInterval(timer))
         <button v-if="selected" class="icon-btn" type="button" title="复制地址" aria-label="复制地址" @click="copy(selected)">
           <Icon name="copy" />
         </button>
+        <template v-if="current">
+          <button
+            class="icon-btn"
+            type="button"
+            :title="current.active ? '停用：不再接收它的邮件' : '启用'"
+            :aria-label="current.active ? '停用邮箱' : '启用邮箱'"
+            @click="setActive(current)"
+          >
+            <Icon name="power" />
+          </button>
+          <button class="icon-btn danger" type="button" title="删除邮箱" aria-label="删除邮箱" @click="remove(current)">
+            <Icon name="trash" />
+          </button>
+        </template>
         <span class="count">{{ mails.length }} 封</span>
       </div>
       <ul v-if="mails.length" class="list">
@@ -214,7 +270,13 @@ onBeforeUnmount(() => window.clearInterval(timer))
               <Icon name="chevron" class="chevron" />
             </button>
           </div>
-          <pre v-if="expanded === mail.id" class="body">{{ mail.body || '(正文为空)' }}</pre>
+          <template v-if="expanded === mail.id">
+            <pre class="body">{{ mail.body || '(正文为空)' }}</pre>
+            <button class="btn" type="button" @click="headersOf = headersOf === mail.id ? null : mail.id">
+              {{ headersOf === mail.id ? '收起邮件头' : '查看邮件头' }}
+            </button>
+            <pre v-if="headersOf === mail.id" class="body">{{ mail.headers || '(没有记录邮件头)' }}</pre>
+          </template>
         </li>
       </ul>
       <div v-else class="empty fill">

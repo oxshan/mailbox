@@ -1,6 +1,12 @@
+export type SourceKind = 'addy' | 'duck'
+
 export interface Mailbox {
   address: string
   domain: string
+  source: number | null
+  source_kind: SourceKind | 'domain'
+  source_name: string | null
+  active: boolean
   scenario: string | null
   scenario_name: string | null
   created_at: number
@@ -14,6 +20,7 @@ export interface Mail {
   from: string
   subject: string
   body: string
+  headers: string
   verify_code: string | null
   received_at: number
   read: boolean
@@ -21,6 +28,7 @@ export interface Mail {
 
 export interface Stats {
   domains: number
+  sources: number
   mailboxes: number
   mails: number
   mails_24h: number
@@ -46,12 +54,14 @@ export interface ScenarioInput {
   name: string
   key: string
   domain_ids: number[]
+  source_ids: number[]
   template_id: number | null
 }
 
 export interface Scenario extends ScenarioInput {
   id: number
   domains: string[]
+  sources: string[]
   template_name: string | null
   mailbox_count: number
   created_at: number
@@ -101,6 +111,33 @@ export interface Forward {
   created_at: number
 }
 
+export type SourceCapability = 'create' | 'toggle' | 'delete'
+
+export interface SourceInput {
+  kind: SourceKind
+  name: string
+  token: string
+  collector: string
+  alias_domain: string
+  alias_format: string
+  note: string
+}
+
+export interface Source extends Omit<SourceInput, 'token'> {
+  id: number
+  token_mask: string
+  enabled: boolean
+  capabilities: SourceCapability[]
+  mailbox_count: number
+  scenario_count: number
+  created_at: number
+}
+
+export interface SourceCheck {
+  status: 'ok' | 'pending' | 'unknown' | 'error'
+  message: string
+}
+
 export class UnauthorizedError extends Error {}
 
 const KEY_STORAGE = 'mailbox_api_key'
@@ -140,9 +177,20 @@ export const api = {
   mailboxes: () => request<{ mailboxes: Mailbox[] }>('mailboxes').then((r) => r.mailboxes),
   mails: (address: string) =>
     request<{ mails: Mail[] }>('mails', { params: address ? { address } : {} }).then((r) => r.mails),
-  markRead: (id: number) => request<{ id: number }>(`read/${id}`, { method: 'POST' }),
-  createMailbox: (scenario: string) =>
-    request<{ address: string; domain: string; scenario: string }>('mailbox', { method: 'POST', params: { scenario } }),
+  markRead: (id: number) => request<{ id: number }>(`mails/${id}/read`, { method: 'POST' }),
+  createMailbox: (scenario: string, source: number | null) =>
+    request<Mailbox>('mailboxes', { method: 'POST', body: source === null ? { scenario } : { scenario, source } }),
+  setMailboxActive: (address: string, active: boolean) =>
+    request<{ synced: boolean }>(`mailboxes/${encodeURIComponent(address)}`, { method: 'PUT', body: { active } }),
+  deleteMailbox: (address: string) =>
+    request<{ synced: boolean }>(`mailboxes/${encodeURIComponent(address)}`, { method: 'DELETE' }),
+
+  sources: () => request<{ sources: Source[] }>('sources').then((r) => r.sources),
+  createSource: (input: SourceInput) => request<{ id: number }>('sources', { method: 'POST', body: input }),
+  updateSource: (id: number, changes: Partial<SourceInput> & { enabled?: boolean }) =>
+    request<{ id: number }>(`sources/${id}`, { method: 'PUT', body: changes }),
+  deleteSource: (id: number) => request<{ id: number }>(`sources/${id}`, { method: 'DELETE' }),
+  checkSource: (id: number) => request<SourceCheck>(`sources/${id}/check`, { method: 'POST' }),
 
   sent: () => request<{ configured: boolean; mails: SentMail[] }>('sent'),
   send: (input: SendInput) => request<{ id: number }>('send', { method: 'POST', body: input }),

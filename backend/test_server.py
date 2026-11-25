@@ -12,18 +12,14 @@ import urllib.request
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
+from urllib.parse import parse_qs, quote, urlencode
 
-import server
-from server import (
-    Config,
-    MailApp,
-    Store,
-    compile_template,
-    extract_code,
-    extract_with_template,
-    html_to_text,
-    parse_mx_response,
-)
+import mxcheck
+from config import Config
+from extract import compile_template, extract_code, extract_with_template, html_to_text, parse_mail
+from mxcheck import parse_mx_response
+from server import MailApp
+from store import SCHEMA_VERSION, Store
 
 
 class ExtractCodeTest(unittest.TestCase):
@@ -68,41 +64,61 @@ class TemplateTest(unittest.TestCase):
                 compile_template(mode, pattern)
 
 
-class MigrationTest(unittest.TestCase):
-    def test_old_database_is_upgraded(self):
+class ParseMailTest(unittest.TestCase):
+    def test_recipient_headers_and_mentions(self):
+        raw = (
+            b"From: Shop <shop_at_example.com_alias@duck.com>\r\n"
+            b"To: Calm-Tree-Owl@duck.com, Other <o@example.org>\r\n"
+            b"Delivered-To: collect@a.test\r\n"
+            b"X-Original-Recipient: hidden@duck.com\r\n"
+            b"Message-ID: <abc@mail.example.com>\r\n"
+            b"Subject: Hi\r\n\r\ncode 1234\r\n"
+        )
+        mail = parse_mail(raw)
+        self.assertEqual(mail["recipients"], ["calm-tree-owl@duck.com", "o@example.org", "collect@a.test"])
+        self.assertEqual(mail["mentions"], ["hidden@duck.com"])
+        self.assertEqual((mail["subject"], mail["plain"]), ("Hi", "code 1234"))
+        self.assertIn("Delivered-To: collect@a.test", mail["headers"])
+
+
+class OldDatabaseTest(unittest.TestCase):
+    def test_old_database_is_kept_aside_not_converted(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "mail.db")
             old = sqlite3.connect(path)
             old.executescript(
                 """
                 CREATE TABLE mailboxes (address TEXT PRIMARY KEY, domain TEXT NOT NULL, created_at REAL NOT NULL);
-                CREATE TABLE mails (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT NOT NULL, sender TEXT,
-                    subject TEXT, body TEXT, code TEXT, received_at REAL NOT NULL);
                 INSERT INTO mailboxes VALUES ('old@a.test', 'a.test', 1);
-                INSERT INTO mails (address, sender, subject, body, code, received_at)
-                    VALUES ('old@a.test', 'x', 's', 'code 1234', '1234', 2);
                 """
             )
             old.commit()
             old.close()
-            store = Store(path)
-            box = store.query("SELECT * FROM mailboxes")[0]
-            self.assertEqual(box["scenario_id"], store.default_scenario_id)
-            self.assertEqual(store.query("SELECT alt, code FROM mails")[0], {"alt": "", "code": "1234"})
-            self.assertEqual(Store(path).default_scenario_id, store.default_scenario_id)
+            store = Store(path, ["a.test"])
+            self.assertTrue(os.path.basename(store.retired).startswith("mail.db.v0-"))
+            self.assertEqual(store.query("SELECT * FROM mailboxes"), [])
+            self.assertEqual(store.domain_names(), {"a.test"})
+            self.assertEqual(store.query("PRAGMA user_version")[0]["user_version"], SCHEMA_VERSION)
+            kept = sqlite3.connect(store.retired)
+            self.assertEqual(kept.execute("SELECT address FROM mailboxes").fetchall(), [("old@a.test",)])
+            kept.close()
+            store.execute("INSERT INTO domains (name, created_at) VALUES ('b.test', 1)")
+            store.db.close()
+            again = Store(path, ["ignored.test"])
+            self.assertIsNone(again.retired)
+            self.assertEqual(again.domain_names(), {"a.test", "b.test"})
+            self.assertEqual(again.default_scenario_id, store.default_scenario_id)
+            again.db.close()
 
-    def test_single_domain_scenarios_become_links(self):
+    def test_newer_database_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "mail.db")
-            store = Store(path, ["a.test", "b.test"])
-            store.execute("INSERT INTO scenarios (key, name, domain, created_at) VALUES ('old', 'Old', 'b.test', 1)")
-            store.db.close()
-            store = Store(path, ["ignored.test"])
-            self.assertEqual(store.domain_names(), {"a.test", "b.test"})
-            old_id = store.query("SELECT id, domain FROM scenarios WHERE key = 'old'")[0]
-            self.assertEqual(old_id["domain"], "")
-            self.assertEqual(store.usable_domains(old_id["id"]), ["b.test"])
-            self.assertEqual(sorted(store.usable_domains(store.default_scenario_id)), ["a.test", "b.test"])
+            newer = sqlite3.connect(path)
+            newer.executescript("CREATE TABLE x (y); PRAGMA user_version = %d;" % (SCHEMA_VERSION + 1))
+            newer.close()
+            with self.assertRaises(RuntimeError):
+                Store(path)
+            self.assertTrue(os.path.isfile(path))
 
 
 class DnsTest(unittest.TestCase):
@@ -152,6 +168,12 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual((body["code"], body["msg"]), (0, "ok"))
         return body["data"]
 
+    def new_box(self, **body):
+        return self.api("/api/mailboxes", method="POST", body=body)
+
+    def code(self, address, **params):
+        return self.api("/api/mailboxes/%s/code?%s" % (quote(address), urlencode(params)))
+
     def api_error(self, *args, **kwargs):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self.api(*args, **kwargs)
@@ -170,13 +192,13 @@ class EndToEndTest(unittest.TestCase):
             method="POST",
             body={"name": "注册", "key": "signup", "domain_ids": [self.domain_id("b.test")], "template_id": template["id"]},
         )
-        box = self.api("/api/mailbox?scenario=signup", method="POST")
+        box = self.new_box(scenario="signup")
         self.assertTrue(box["address"].endswith("@b.test"))
         self.assertEqual(box["scenario"], "signup")
         self.send(box["address"], "Welcome", "Order 123456 confirmed.\nYour access token:  AB12-CD34\nBye")
-        self.assertEqual(self.api("/api/code?address=" + box["address"])["verify_code"], "AB12-CD34")
+        self.assertEqual(self.code(box["address"])["verify_code"], "AB12-CD34")
         self.send(box["address"], "Other", "Your verification code is 998877")
-        self.assertEqual(self.api("/api/code?address=" + box["address"])["verify_code"], "AB12-CD34")
+        self.assertEqual(self.code(box["address"])["verify_code"], "AB12-CD34")
 
         listed = self.api("/api/mailboxes?scenario=signup")["mailboxes"]
         self.assertEqual([b["address"] for b in listed], [box["address"]])
@@ -192,7 +214,7 @@ class EndToEndTest(unittest.TestCase):
             method="PUT",
             body={"name": "令牌", "mode": "regex", "pattern": r"code is (\d{6})"},
         )
-        self.assertEqual(self.api("/api/code?address=" + box["address"])["verify_code"], "998877")
+        self.assertEqual(self.code(box["address"])["verify_code"], "998877")
 
         self.api("/api/scenarios/%d" % scenario["id"], method="DELETE")
         moved = {b["address"]: b for b in self.api("/api/mailboxes")["mailboxes"]}[box["address"]]
@@ -203,7 +225,7 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(self.api("/api/templates")["templates"], [])
 
     def test_template_and_scenario_validation(self):
-        self.assertEqual(self.api_error("/api/mailbox?scenario=nope")[0], 400)
+        self.assertEqual(self.api_error("/api/mailboxes", method="POST", body={"scenario": "nope"})[0], 400)
         self.assertEqual(
             self.api_error("/api/templates", method="POST", body={"name": "x", "mode": "regex", "pattern": "("})[0], 400
         )
@@ -235,22 +257,22 @@ class EndToEndTest(unittest.TestCase):
         c_id = self.api("/api/domains", method="POST", body={"name": "@C.Test", "note": "备用"})["id"]
         d_id = self.api("/api/domains", method="POST", body={"name": "d.test"})["id"]
         scenario = self.api("/api/scenarios", method="POST", body={"name": "多域名", "key": "multi", "domain_ids": [c_id, d_id]})
-        seen = {self.api("/api/mailbox?scenario=multi")["domain"] for _ in range(30)}
+        seen = {self.new_box(scenario="multi")["domain"] for _ in range(30)}
         self.assertEqual(seen, {"c.test", "d.test"})
-        self.assertEqual(self.api_error("/api/mailbox?scenario=multi&domain=a.test")[0], 400)
+        self.assertEqual(self.api_error("/api/mailboxes", method="POST", body={"scenario": "multi", "domain": "a.test"})[0], 400)
 
         self.api("/api/domains/%d" % d_id, method="PUT", body={"enabled": False})
-        seen = {self.api("/api/mailbox?scenario=multi")["domain"] for _ in range(15)}
+        seen = {self.new_box(scenario="multi")["domain"] for _ in range(15)}
         self.assertEqual(seen, {"c.test"})
-        self.assertNotIn("d.test", {self.api("/api/mailbox")["domain"] for _ in range(30)})
+        self.assertNotIn("d.test", {self.new_box()["domain"] for _ in range(30)})
         self.send("still@d.test", "Hi", "code 4455")
-        self.assertEqual(self.api("/api/code?address=still@d.test")["verify_code"], "4455")
+        self.assertEqual(self.code("still@d.test")["verify_code"], "4455")
         listed = {d["name"]: d for d in self.api("/api/domains")["domains"]}
         self.assertEqual((listed["d.test"]["enabled"], listed["c.test"]["note"]), (False, "备用"))
         self.assertEqual(listed["c.test"]["scenario_count"], 1)
 
         self.api("/api/domains/%d" % c_id, method="PUT", body={"enabled": False})
-        self.assertIn("没有可用的域名", self.api_error("/api/mailbox?scenario=multi")[1])
+        self.assertIn("没有可用的域名", self.api_error("/api/mailboxes", method="POST", body={"scenario": "multi"})[1])
 
         self.api("/api/domains/%d" % c_id, method="DELETE")
         self.api("/api/domains/%d" % d_id, method="DELETE")
@@ -262,16 +284,16 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(self.api_error("/api/domains/%d" % c_id, method="DELETE")[0], 404)
 
     def test_domain_check(self):
-        original, original_ip = server.resolve_mx, server.public_ip
+        original, original_ip = mxcheck.resolve_mx, mxcheck.public_ip
         check = lambda: self.api("/api/domains/check", method="POST", body={"name": "a.test"})
         self.app.cfg.mx_check_port = self.app.smtp_port
         try:
-            server.public_ip = lambda cfg: None
-            server.resolve_mx = lambda name: [(10, "127.0.0.1")]
+            mxcheck.public_ip = lambda cfg: None
+            mxcheck.resolve_mx = lambda name: [(10, "127.0.0.1")]
             self.assertEqual(check()["status"], "ok")
-            server.resolve_mx = lambda name: []
+            mxcheck.resolve_mx = lambda name: []
             self.assertEqual(check()["status"], "missing")
-            server.resolve_mx = lambda name: [(10, "127.0.0.1")]
+            mxcheck.resolve_mx = lambda name: [(10, "127.0.0.1")]
             self.app.cfg.mx_check_port = self.app.http_port
             result = check()
             self.assertIn(result["status"], ("mismatch", "unverified"))
@@ -279,17 +301,17 @@ class EndToEndTest(unittest.TestCase):
 
             self.app.cfg.mx_check_port = 1
             self.assertEqual(check()["status"], "unverified")
-            server.public_ip = lambda cfg: "127.0.0.1"
+            mxcheck.public_ip = lambda cfg: "127.0.0.1"
             result = check()
             self.assertEqual(result["status"], "ok")
             self.assertIn("公网 IP", result["message"])
-            server.public_ip = lambda cfg: "203.0.113.9"
+            mxcheck.public_ip = lambda cfg: "203.0.113.9"
             self.assertEqual(check()["status"], "mismatch")
-            server.resolve_mx = lambda name: [(10, "no-such-host.invalid")]
-            with mock.patch.object(server.socket, "getaddrinfo", side_effect=OSError("unknown host")):
-                self.assertEqual(server.check_domain("a.test", "x", own_ip="203.0.113.9")["status"], "error")
+            mxcheck.resolve_mx = lambda name: [(10, "no-such-host.invalid")]
+            with mock.patch.object(mxcheck.socket, "getaddrinfo", side_effect=OSError("unknown host")):
+                self.assertEqual(mxcheck.check_domain("a.test", "x", own_ip="203.0.113.9")["status"], "error")
         finally:
-            server.resolve_mx, server.public_ip = original, original_ip
+            mxcheck.resolve_mx, mxcheck.public_ip = original, original_ip
         self.assertEqual(self.api_error("/api/domains/check", method="POST", body={"name": "nope.test"})[0], 404)
 
     def fake_resend(self):
@@ -341,7 +363,7 @@ class EndToEndTest(unittest.TestCase):
         try:
             self.assertTrue(self.api("/api/forwards")["configured"])
             self.send("fw@a.test", "Your code", "code 2468", html="<p>code <b>2468</b></p>")
-            self.assertEqual(self.api("/api/code?address=fw@a.test")["verify_code"], "2468")
+            self.assertEqual(self.code("fw@a.test")["verify_code"], "2468")
             self.assertEqual(len(calls), 1)
             sent = calls[0][2]
             self.assertEqual(sent["from"], '"Example via Mailbox" <fw@a.test>')
@@ -370,7 +392,7 @@ class EndToEndTest(unittest.TestCase):
             self.send("fw@a.test", "Over the limit", "code 3579")
             self.send("fw@a.test", "Still over", "code 3580")
             self.assertEqual(len(calls), before)
-            self.assertEqual(self.api("/api/code?address=fw@a.test")["verify_code"], "3580")
+            self.assertEqual(self.code("fw@a.test")["verify_code"], "3580")
             records = forwarded()
             self.assertEqual(len(records), cfg.forward_hourly_limit + 1)
             self.assertEqual((records[0]["status"], records[0]["subject"]), ("failed", "Over the limit"))
@@ -443,6 +465,301 @@ class EndToEndTest(unittest.TestCase):
         with smtplib.SMTP("127.0.0.1", self.app.smtp_port, timeout=10) as client:
             client.send_message(msg)
 
+    def fake_sources(self):
+        """Start a stand-in for the addy.io and Duck APIs and point the app at it. Returns (server, state)."""
+        state = {"calls": [], "recipients": [], "aliases": [], "limited": False}
+
+        class FakeSources(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def reply(self, status, payload=None):
+                body = b"" if payload is None else json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def handle_call(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length)) if length else None
+                path, _, query = self.path.partition("?")
+                state["calls"].append((self.command, path, body, self.headers["User-Agent"]))
+                good = self.headers["Authorization"] in ("Bearer addy_good_token_123", "Bearer duck_good_token_456")
+                if path == "/duck/email/addresses":
+                    if not good:
+                        return self.reply(401)
+                    state["aliases"].append({"id": "", "email": "quack-%d@duck.com" % (len(state["aliases"]) + 1)})
+                    return self.reply(201, {"address": state["aliases"][-1]["email"].split("@")[0].upper()})
+                if not good:
+                    return self.reply(401, {"message": "Unauthenticated."})
+                if path == "/addy/api-token-details":
+                    return self.reply(200, {"name": "test"})
+                if path == "/addy/recipients" and self.command == "GET":
+                    return self.reply(200, {"data": state["recipients"]})
+                if path == "/addy/recipients":
+                    row = {"id": "rc-%d" % (len(state["recipients"]) + 1), "email": body["email"], "email_verified_at": None}
+                    state["recipients"].append(row)
+                    return self.reply(201, {"data": row})
+                if path == "/addy/domain-options":
+                    return self.reply(200, {"data": ["anonaddy.me"], "defaultAliasDomain": "anonaddy.me"})
+                if path == "/addy/aliases" and self.command == "POST":
+                    if state["limited"]:
+                        return self.reply(429, {"message": "You have reached your hourly limit for creating new aliases"})
+                    number = len(state["aliases"]) + 1
+                    alias = {"id": "al-%d" % number, "email": "W%d@%s" % (number, body["domain"]), "active": True}
+                    state["aliases"].append(alias)
+                    return self.reply(201, {"data": alias})
+                if path == "/addy/aliases":
+                    wanted = parse_qs(query)["filter[search]"][0]
+                    return self.reply(200, {"data": [a for a in state["aliases"] if wanted in a["email"].lower()]})
+                return self.reply(204)
+
+            do_GET = do_POST = do_DELETE = handle_call
+
+        fake = ThreadingHTTPServer(("127.0.0.1", 0), FakeSources)
+        threading.Thread(target=fake.serve_forever, daemon=True).start()
+        cfg = self.app.cfg
+        cfg.addy_api_url = "http://127.0.0.1:%d/addy" % fake.server_address[1]
+        cfg.duck_api_url = "http://127.0.0.1:%d/duck/" % fake.server_address[1]
+        return fake, state
+
+    def close_sources(self, fake):
+        fake.shutdown()
+        fake.server_close()
+        store = self.app.store
+        store.execute("DELETE FROM mails WHERE address IN (SELECT address FROM mailboxes WHERE source_id IS NOT NULL)")
+        store.execute("DELETE FROM mailboxes WHERE source_id IS NOT NULL OR address LIKE 'collect-%'")
+        store.execute("DELETE FROM mails WHERE address LIKE 'collect-%'")
+        store.execute("DELETE FROM sources")
+        store.execute("DELETE FROM scenario_sources")
+
+    def relay(self, collector, to, subject, body, sender="Example <noreply@example.com>"):
+        """Deliver a mail the way a forwarding service does: addressed to an alias, handed to the collector."""
+        msg = EmailMessage()
+        msg["From"], msg["To"], msg["Subject"] = sender, to, subject
+        msg.set_content(body)
+        with smtplib.SMTP("127.0.0.1", self.app.smtp_port, timeout=10) as client:
+            client.sendmail("bounce@forwarder.example", [collector], msg.as_bytes())
+
+    def boxes(self, query=""):
+        return {b["address"]: b for b in self.api("/api/mailboxes?limit=500" + query)["mailboxes"]}
+
+    def test_source_validation(self):
+        post = lambda **body: self.api_error("/api/sources", method="POST", body=body)
+        good = {"kind": "addy", "name": "主号", "token": "addy_good_token_123", "collector": "collect-v@a.test"}
+        self.assertEqual(post(**dict(good, kind="gmail"))[0], 400)
+        self.assertIn("名称", post(**dict(good, name=" "))[1])
+        self.assertIn("令牌", post(**dict(good, token=""))[1])
+        self.assertIn("已添加域名", post(**dict(good, collector="me@gmail.com"))[1])
+        self.assertIn("别名格式", post(**dict(good, alias_format="custom"))[1])
+        self.assertIn("别名域名", post(**dict(good, alias_domain="not a domain"))[1])
+        first = self.api("/api/sources", method="POST", body=good)["id"]
+        try:
+            self.assertIn("另一个来源", post(**dict(good, kind="duck", name="副号"))[1])
+            self.assertEqual(self.api_error("/api/sources/%d/nope" % first, method="POST")[0], 404)
+            self.assertEqual(self.api_error("/api/sources/99999", method="PUT", body={"name": "x"})[0], 404)
+            self.assertIn("收集地址", self.api_error("/api/domains/%d" % self.domain_id("a.test"), method="DELETE")[1])
+            self.api("/api/sources/%d" % first, method="PUT", body={"name": "改名", "token": "", "enabled": False})
+            listed = self.api("/api/sources")["sources"][0]
+            self.assertEqual((listed["name"], listed["enabled"], listed["token_mask"]), ("改名", False, "addy…_123"))
+            self.assertNotIn("token", listed)
+            self.assertEqual(listed["capabilities"], ["create", "toggle", "delete"])
+            self.assertEqual(self.app.store.source(first)["token"], "addy_good_token_123")
+            self.assertEqual(self.api("/api/stats")["sources"], 1)
+        finally:
+            self.api("/api/sources/%d" % first, method="DELETE")
+        self.assertEqual(self.api("/api/sources")["sources"], [])
+
+    def test_addy_source(self):
+        fake, state = self.fake_sources()
+        collector = "collect-addy@a.test"
+        try:
+            source = self.api(
+                "/api/sources",
+                method="POST",
+                body={"kind": "addy", "name": "addy 主号", "token": "addy_good_token_123", "collector": "Collect-Addy@A.test"},
+            )["id"]
+            check = lambda: self.api("/api/sources/%d/check" % source, method="POST")
+            self.assertIn("不是 addy 的收件人", self.api_error("/api/mailboxes", method="POST", body={"source": source})[1])
+            self.assertEqual(check()["status"], "pending")
+            self.assertEqual(state["recipients"][0]["email"], collector)
+            state["recipients"][0]["email_verified_at"] = "2026-11-25 10:00:00"
+            self.assertEqual(check()["status"], "ok")
+            self.assertEqual(len(state["recipients"]), 1)
+
+            box = self.new_box(source=source)
+            self.assertEqual((box["address"], box["domain"]), ("w1@anonaddy.me", "anonaddy.me"))
+            self.assertEqual((box["source"], box["source_kind"], box["source_name"]), (source, "addy", "addy 主号"))
+            self.assertEqual((box["scenario"], box["active"]), ("default", True))
+            created = [call for call in state["calls"] if call[:2] == ("POST", "/addy/aliases")][0]
+            self.assertEqual((created[2]["domain"], created[2]["recipient_ids"]), ("anonaddy.me", ["rc-1"]))
+            self.assertNotIn("format", created[2])
+            self.assertEqual(created[3], "mailbox/1.0")
+
+            self.relay(collector, "W1@anonaddy.me", "Verify", "Your verification code is 700123")
+            self.assertEqual(self.code(box["address"])["verify_code"], "700123")
+            self.assertEqual(self.api("/api/mailboxes/%s/mails" % box["address"])["mails"][0]["address"], box["address"])
+            self.assertIn("To: W1@anonaddy.me", self.api("/api/mails?address=" + box["address"])["mails"][0]["headers"])
+            self.assertNotIn(collector, self.boxes())
+
+            self.relay(collector, "made-elsewhere@anonaddy.me", "Verify", "Your verification code is 700456")
+            elsewhere = self.boxes("&source=%d" % source)["made-elsewhere@anonaddy.me"]
+            self.assertEqual((elsewhere["source_kind"], elsewhere["scenario"], elsewhere["mail_count"]), ("addy", "default", 1))
+            self.assertEqual(sorted(self.boxes("&source=%d" % source)), ["made-elsewhere@anonaddy.me", "w1@anonaddy.me"])
+            self.assertNotIn("w1@anonaddy.me", self.boxes("&source=domain"))
+
+            self.relay(collector, collector, "Confirm your recipient", "Click the link, code 700789")
+            self.assertEqual(self.boxes()[collector]["source_kind"], "domain")
+
+            path = "/api/mailboxes/" + box["address"]
+            self.assertEqual(self.api(path, method="PUT", body={"active": False}), {"address": box["address"], "active": False, "synced": True})
+            self.assertEqual(state["calls"][-1][:2], ("DELETE", "/addy/active-aliases/al-1"))
+            self.assertFalse(self.api(path)["active"])
+            self.relay(collector, "w1@anonaddy.me", "Verify", "Your verification code is 700999")
+            self.assertEqual(self.code(box["address"])["verify_code"], "700123")
+            self.assertEqual(sorted(self.boxes("&active=false")), ["w1@anonaddy.me"])
+            self.api(path, method="PUT", body={"active": True})
+            self.assertEqual(state["calls"][-1][:3], ("POST", "/addy/active-aliases", {"id": "al-1"}))
+
+            state["aliases"].append({"id": "al-77", "email": "made-elsewhere@anonaddy.me"})
+            self.api("/api/mailboxes/made-elsewhere@anonaddy.me", method="PUT", body={"active": False})
+            self.assertEqual(state["calls"][-1][:2], ("DELETE", "/addy/active-aliases/al-77"))
+            self.assertEqual(self.app.store.mailbox("made-elsewhere@anonaddy.me")["remote_id"], "al-77")
+
+            state["limited"] = True
+            before = len(self.boxes())
+            status, message = self.api_error("/api/mailboxes", method="POST", body={"source": source})
+            self.assertEqual(status, 502)
+            self.assertIn("hourly limit", message)
+            self.assertEqual(len(self.boxes()), before)
+            state["limited"] = False
+
+            self.api("/api/sources/%d" % source, method="PUT", body={"alias_domain": "me.anonaddy.com", "alias_format": "uuid"})
+            self.assertEqual(self.new_box(source=source)["domain"], "me.anonaddy.com")
+            self.assertEqual(state["calls"][-1][2]["format"], "uuid")
+
+            self.assertIn("3 个邮箱", self.api_error("/api/sources/%d" % source, method="DELETE")[1])
+            self.assertEqual(self.api(path, method="DELETE"), {"address": box["address"], "synced": True})
+            self.assertEqual(state["calls"][-1][:2], ("DELETE", "/addy/aliases/al-1"))
+            self.assertEqual(self.api_error(path)[0], 404)
+            self.assertEqual(self.api_error(path, method="DELETE")[0], 404)
+            self.assertIsNone(self.code(box["address"])["verify_code"])
+
+            self.api("/api/sources/%d" % source, method="PUT", body={"token": "addy_bad_token"})
+            self.assertEqual(self.api_error("/api/sources/%d/check" % source, method="POST"), (502, "addy.io 返回 401：Unauthenticated."))
+        finally:
+            self.close_sources(fake)
+
+    def test_duck_source(self):
+        fake, state = self.fake_sources()
+        collector = "collect-duck@b.test"
+        try:
+            source = self.api(
+                "/api/sources",
+                method="POST",
+                body={"kind": "duck", "name": "Duck", "token": "duck_good_token_456", "collector": collector, "alias_format": "uuid"},
+            )["id"]
+            listed = self.api("/api/sources")["sources"][0]
+            self.assertEqual((listed["capabilities"], listed["alias_format"]), (["create"], ""))
+            self.assertEqual(self.api("/api/sources/%d/check" % source, method="POST")["status"], "unknown")
+
+            box = self.new_box(source=source)
+            self.assertEqual((box["address"], box["source_kind"]), ("quack-1@duck.com", "duck"))
+            self.assertIn("Mozilla/5.0", state["calls"][-1][3])
+
+            relay = lambda code: self.relay(
+                collector, "Quack-1@duck.com", "Verify", "Your verification code is %s" % code,
+                sender="Shop <shop_at_example.com_quack-9@duck.com>",
+            )
+            relay("810001")
+            self.assertEqual(self.code(box["address"])["verify_code"], "810001")
+            self.assertNotIn("quack-9@duck.com", self.boxes())
+            self.relay(collector, "someone@gmail.com", "Not for an alias", "code 810002")
+            self.assertEqual(self.boxes()[collector]["mail_count"], 1)
+
+            path = "/api/mailboxes/" + box["address"]
+            calls = len(state["calls"])
+            self.assertEqual(self.api(path, method="PUT", body={"active": False})["synced"], False)
+            relay("810003")
+            self.assertEqual(self.code(box["address"])["verify_code"], "810001")
+            self.assertEqual(self.api(path, method="DELETE"), {"address": box["address"], "synced": False})
+            self.assertEqual(len(state["calls"]), calls)
+            relay("810004")
+            again = self.boxes()[box["address"]]
+            self.assertEqual((again["source"], again["scenario"], again["active"]), (source, "default", True))
+            self.assertEqual(self.code(box["address"])["verify_code"], "810004")
+
+            self.api("/api/sources/%d" % source, method="PUT", body={"token": "duck_bad_token"})
+            self.assertEqual(self.api_error("/api/mailboxes", method="POST", body={"source": source}), (502, "Duck 返回 401：令牌无效或已过期"))
+        finally:
+            self.close_sources(fake)
+
+    def test_scenario_sources(self):
+        fake, state = self.fake_sources()
+        scenario_ids = []
+        try:
+            add = lambda name, collector: self.api(
+                "/api/sources",
+                method="POST",
+                body={"kind": "duck", "name": name, "token": "duck_good_token_456", "collector": collector},
+            )["id"]
+            first, second = add("甲", "collect-1@a.test"), add("乙", "collect-2@a.test")
+            scene = lambda **body: scenario_ids.append(self.api("/api/scenarios", method="POST", body=body)["id"])
+            scene(name="只用甲", key="only-first", source_ids=[first])
+            scene(name="甲和域名", key="mixed", source_ids=[first], domain_ids=[self.domain_id("b.test")])
+            self.assertEqual(
+                self.api_error("/api/scenarios", method="POST", body={"name": "x", "source_ids": [99999]})[0], 400
+            )
+            listed = {s["key"]: s for s in self.api("/api/scenarios")["scenarios"]}
+            self.assertEqual((listed["mixed"]["source_ids"], listed["mixed"]["sources"]), ([first], ["甲"]))
+            self.assertEqual(listed["default"]["source_ids"], [])
+            self.assertEqual(self.api("/api/sources")["sources"][0]["scenario_count"], 2)
+
+            self.assertEqual({self.new_box()["source_kind"] for _ in range(10)}, {"domain"})
+            self.assertEqual(self.new_box(source=second)["source"], second)
+            self.assertEqual({self.new_box(scenario="only-first")["source"] for _ in range(5)}, {first})
+            self.assertIn("不能使用来源", self.api_error("/api/mailboxes", method="POST", body={"scenario": "only-first", "source": second})[1])
+            self.assertEqual(self.new_box(scenario="only-first", domain="a.test")["source_kind"], "domain")
+            self.assertEqual(self.api_error("/api/mailboxes", method="POST", body={"source": first, "domain": "a.test"})[0], 400)
+            self.assertEqual(self.api_error("/api/mailboxes", method="POST", body={"source": 99999})[0], 400)
+            mixed = [self.new_box(scenario="mixed") for _ in range(40)]
+            self.assertEqual({(b["source_kind"], b["domain"]) for b in mixed}, {("duck", "duck.com"), ("domain", "b.test")})
+            self.assertEqual(self.boxes("&scenario=only-first&source=%d" % first).keys() <= self.boxes("&source=%d" % first).keys(), True)
+
+            self.api("/api/sources/%d" % first, method="PUT", body={"enabled": False})
+            self.assertIn("已停用", self.api_error("/api/mailboxes", method="POST", body={"source": first})[1])
+            self.assertIn("都已停用", self.api_error("/api/mailboxes", method="POST", body={"scenario": "only-first"})[1])
+            self.assertEqual({self.new_box(scenario="mixed")["source_kind"] for _ in range(5)}, {"domain"})
+        finally:
+            for scenario_id in scenario_ids:
+                self.api("/api/scenarios/%d" % scenario_id, method="DELETE")
+            self.close_sources(fake)
+        self.assertEqual(self.app.store.query("SELECT * FROM scenario_sources"), [])
+
+    def test_disable_and_delete_local_mailbox(self):
+        address = self.new_box(domain="a.test")["address"]
+        path = "/api/mailboxes/" + address
+        self.send(address, "Code", "code 310001")
+        self.assertEqual(self.api_error(path, method="PUT", body={})[0], 400)
+        self.assertEqual(self.api(path, method="PUT", body={"active": False}), {"address": address, "active": False, "synced": False})
+        with self.assertRaises(smtplib.SMTPRecipientsRefused):
+            self.send(address, "Code", "code 310002")
+        self.assertIn(address, self.boxes("&active=0"))
+        self.assertNotIn(address, self.boxes("&active=1"))
+        self.app.store.execute("UPDATE mailboxes SET created_at = created_at - 7200 WHERE address = ?", (address,))
+        self.app.store.execute("UPDATE mails SET received_at = received_at - 7200 WHERE address = ?", (address,))
+        self.app.store.purge(3600)
+        self.assertFalse(self.api(path)["active"])
+        self.api(path, method="PUT", body={"active": True})
+        self.send(address, "Code", "code 310003")
+        self.assertEqual(self.code(address)["verify_code"], "310003")
+        self.assertEqual(self.api(path, method="DELETE"), {"address": address, "synced": False})
+        self.assertEqual(self.api_error(path)[0], 404)
+        self.assertEqual(self.api("/api/mailboxes/%s/mails" % address)["mails"], [])
+        self.assertEqual(self.api_error("/api/mailboxes/%s/nope" % address)[0], 404)
+        self.assertEqual(self.api_error("/api/domains/1/extra")[0], 404)
+
     def test_requires_api_key(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self.api("/api/domains", key="wrong")
@@ -450,23 +767,23 @@ class EndToEndTest(unittest.TestCase):
 
     def test_create_mailbox(self):
         self.assertEqual([d["name"] for d in self.api("/api/domains")["domains"]][:2], ["a.test", "b.test"])
-        box = self.api("/api/mailbox?domain=b.test", method="POST")
+        box = self.new_box(domain="b.test")
         self.assertRegex(box["address"], r"^[a-z][a-z0-9]{9}@b\.test$")
-        self.assertIn(self.api("/api/mailbox")["domain"], ["a.test", "b.test"])
+        self.assertIn(self.new_box()["domain"], ["a.test", "b.test"])
         with self.assertRaises(urllib.error.HTTPError) as ctx:
-            self.api("/api/mailbox?domain=evil.test")
+            self.new_box(domain="evil.test")
         self.assertEqual(ctx.exception.code, 400)
 
     def test_receive_and_query_code(self):
-        address = self.api("/api/mailbox?domain=a.test")["address"]
-        self.assertIsNone(self.api("/api/code?address=" + address)["verify_code"])
+        address = self.new_box(domain="a.test")["address"]
+        self.assertIsNone(self.code(address)["verify_code"])
         self.send(address, "验证码", "您的验证码是 135790，请勿泄露。")
-        result = self.api("/api/code?address=" + address)
+        result = self.code(address)
         self.assertEqual(result["verify_code"], "135790")
         self.assertEqual(result["subject"], "验证码")
         self.assertIn("noreply@example.com", result["from"])
         self.send(address, "New code", "plain", html="<p>Your code is <b>864209</b></p>")
-        self.assertEqual(self.api("/api/code?address=" + address)["verify_code"], "864209")
+        self.assertEqual(self.code(address)["verify_code"], "864209")
         mails = self.api("/api/mails?address=" + address)["mails"]
         self.assertEqual([m["verify_code"] for m in mails], ["864209", "135790"])
         boxes = {b["address"]: b for b in self.api("/api/mailboxes")["mailboxes"]}
@@ -474,35 +791,35 @@ class EndToEndTest(unittest.TestCase):
         self.assertGreaterEqual(self.api("/api/stats")["codes"], 2)
 
     def test_mark_mail_read(self):
-        address = self.api("/api/mailbox?domain=a.test")["address"]
+        address = self.new_box(domain="a.test")["address"]
         self.send(address, "First", "code 100001")
         self.send(address, "Second", "code 100002")
         second, first = self.api("/api/mails?address=" + address)["mails"]
         self.assertEqual((first["read"], second["read"]), (False, False))
-        self.assertEqual(self.api("/api/read/%d" % first["id"], method="POST"), {"id": first["id"], "read": True})
-        self.api("/api/read/%d" % first["id"], method="POST")
+        self.assertEqual(self.api("/api/mails/%d/read" % first["id"], method="POST"), {"id": first["id"], "read": True})
+        self.api("/api/mails/%d/read" % first["id"], method="POST")
         second, first = self.api("/api/mails?address=" + address)["mails"]
         self.assertEqual((first["read"], second["read"]), (True, False))
-        self.assertEqual(self.api("/api/code?address=" + address)["verify_code"], "100002")
-        self.assertEqual(self.api_error("/api/read/99999999", method="POST")[0], 404)
+        self.assertEqual(self.code(address)["verify_code"], "100002")
+        self.assertEqual(self.api_error("/api/mails/99999999/read", method="POST")[0], 404)
 
     def test_since_filters_old_codes(self):
-        address = self.api("/api/mailbox?domain=a.test")["address"]
+        address = self.new_box(domain="a.test")["address"]
         self.send(address, "Code", "code 111222")
         future = time.time() + 5
-        self.assertIsNone(self.api("/api/code?address=%s&since=%s" % (address, future))["verify_code"])
+        self.assertIsNone(self.code(address, since=future)["verify_code"])
 
     def test_long_poll_waits_for_mail(self):
-        address = self.api("/api/mailbox?domain=a.test")["address"]
+        address = self.new_box(domain="a.test")["address"]
         threading.Timer(1.0, self.send, (address, "Login", "Your code: 5566")).start()
         started = time.time()
-        result = self.api("/api/code?address=%s&wait=10" % address)
+        result = self.code(address, wait=10)
         self.assertEqual(result["verify_code"], "5566")
         self.assertLess(time.time() - started, 5)
 
     def test_catch_all_and_unknown_domain(self):
         self.send("anything.goes@b.test", "Hi", "PIN 4821")
-        self.assertEqual(self.api("/api/code?address=Anything.Goes@b.test")["verify_code"], "4821")
+        self.assertEqual(self.code("Anything.Goes@b.test")["verify_code"], "4821")
         with self.assertRaises(smtplib.SMTPRecipientsRefused):
             self.send("someone@other.test", "Hi", "code 1234")
 
@@ -514,7 +831,7 @@ class EndToEndTest(unittest.TestCase):
     def test_purge_hides_old_mail_without_deleting_it(self):
         store = self.app.store
         scenario = self.api("/api/scenarios", method="POST", body={"name": "保留", "key": "keep"})
-        address = self.api("/api/mailbox?scenario=keep&domain=a.test")["address"]
+        address = self.new_box(scenario="keep", domain="a.test")["address"]
         self.send(address, "Code", "code 998877")
         cfg = self.app.cfg
         cfg.resend_api_key, original_url = "re_test", cfg.resend_api_url
@@ -530,7 +847,7 @@ class EndToEndTest(unittest.TestCase):
         store.purge(3600)
 
         self.assertEqual(self.api("/api/mails?address=" + address)["mails"], [])
-        self.assertIsNone(self.api("/api/code?address=" + address)["verify_code"])
+        self.assertIsNone(self.code(address)["verify_code"])
         self.assertNotIn(address, [b["address"] for b in self.api("/api/mailboxes")["mailboxes"]])
         self.assertNotIn("old", [m["subject"] for m in self.api("/api/sent")["mails"]])
         after = self.api("/api/stats")
@@ -543,7 +860,7 @@ class EndToEndTest(unittest.TestCase):
         self.assertIsNotNone(store.query("SELECT deleted_at FROM sent_mails WHERE subject = 'old'")[0]["deleted_at"])
 
         self.send(address, "Again", "code 112233")
-        self.assertEqual(self.api("/api/code?address=" + address)["verify_code"], "112233")
+        self.assertEqual(self.code(address)["verify_code"], "112233")
         revived = {b["address"]: b for b in self.api("/api/mailboxes")["mailboxes"]}[address]
         self.assertEqual((revived["scenario"], revived["mail_count"]), ("keep", 1))
         self.api("/api/scenarios/%d" % scenario["id"], method="DELETE")
