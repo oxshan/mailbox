@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api, type Domain, type Mail, type Mailbox, type Scenario, type Source, type Stats } from '../api'
 import Icon from '../Icon.vue'
-import { copy, fail, formatTime, notify } from '../ui'
+import { copy, fail, formatTime } from '../ui'
 
 const REFRESH_MS = 5000
 
@@ -54,7 +54,6 @@ const visibleBoxes = computed(() => {
     [box.address, box.scenario_name ?? '', box.source_name ?? ''].some((text) => text.toLowerCase().includes(keyword)),
   )
 })
-const current = computed(() => mailboxes.value.find((box) => box.address === selected.value) ?? null)
 
 async function refresh() {
   refreshing.value = true
@@ -85,35 +84,6 @@ async function createMailbox() {
     fail(err, '生成失败')
   } finally {
     creating.value = false
-  }
-}
-
-async function setActive(box: Mailbox) {
-  try {
-    const { synced } = await api.setMailboxActive(box.address, !box.active)
-    const where = synced ? `，已同步到 ${box.source_name}` : box.source === null ? '' : '（仅本系统，来源不支持远端停用）'
-    notify(box.active ? `已停用，不再接收它的邮件${where}` : `已启用${where}`)
-    await refresh()
-  } catch (err) {
-    fail(err, '操作失败')
-  }
-}
-
-async function remove(box: Mailbox) {
-  const note = {
-    domain: '之后再有邮件发到这个地址，它会重新出现；想拒收请改用停用。',
-    addy: '同时会在 addy.io 删除这个别名。',
-    outlook: '',
-    duck: 'Duck 不支持删除，这个地址在 Duck 仍然有效，再来信会重新出现；想拒收请改用停用。',
-  }[box.source_kind]
-  if (!window.confirm(`确定删除邮箱 ${box.address} 吗？${note}`)) return
-  try {
-    await api.deleteMailbox(box.address)
-    selected.value = ''
-    notify('已删除')
-    await refresh()
-  } catch (err) {
-    fail(err, '删除失败')
   }
 }
 
@@ -243,27 +213,9 @@ onBeforeUnmount(() => window.clearInterval(timer))
         <button v-if="selected" class="icon-btn" type="button" title="复制地址" aria-label="复制地址" @click="copy(selected)">
           <Icon name="copy" />
         </button>
-        <template v-if="current">
-          <button
-            class="icon-btn"
-            type="button"
-            :title="current.active ? '停用：不再接收它的邮件' : '启用'"
-            :aria-label="current.active ? '停用邮箱' : '启用邮箱'"
-            @click="setActive(current)"
-          >
-            <Icon name="power" />
-          </button>
-          <button
-            v-if="current.account === null"
-            class="icon-btn danger"
-            type="button"
-            title="删除邮箱"
-            aria-label="删除邮箱"
-            @click="remove(current)"
-          >
-            <Icon name="trash" />
-          </button>
-        </template>
+        <button class="icon-btn" type="button" title="刷新邮件" aria-label="刷新邮件" @click="refresh">
+          <Icon name="refresh" :class="{ spin: refreshing }" />
+        </button>
         <span class="count">{{ mails.length }} 封</span>
       </div>
       <ul v-if="mails.length" class="list">
