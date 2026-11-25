@@ -1297,3 +1297,20 @@ fieldset.field > legend {
   min-width: 0;
   font-family: var(--mono);
 }
+
+.html-body {
+  display: block;
+  width: calc(100% - 24px);
+  height: 480px;
+  margin: 0 12px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.body-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 12px 10px;
+}

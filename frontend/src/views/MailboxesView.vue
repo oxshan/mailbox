@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api, type Domain, type Mail, type Mailbox, type Scenario, type Source, type Stats } from '../api'
 import Icon from '../Icon.vue'
 import { copy, fail, formatTime, notify } from '../ui'
@@ -18,6 +18,23 @@ const filter = ref('')
 const scenario = ref('default')
 const source = ref<number | null>(null)
 const headersOf = ref<number | null>(null)
+const plainOf = reactive(new Set<number>())
+const imagesOf = reactive(new Set<number>())
+
+const flip = (set: Set<number>, id: number) => (set.has(id) ? set.delete(id) : set.add(id))
+
+// Mail HTML runs in a sandboxed frame without scripts. Remote images are blocked unless asked for, so
+// opening a mail does not tell the sender it was read; links open in a new tab.
+function htmlDocument(html: string, images: boolean) {
+  const policy = `default-src 'none'; style-src 'unsafe-inline'; font-src data:; img-src data: cid:${images ? ' https: http:' : ''}`
+  return (
+    `<!doctype html><html><head><meta charset="utf-8">` +
+    `<meta http-equiv="Content-Security-Policy" content="${policy}">` +
+    `<base target="_blank"><style>body{margin:8px;font:14px/1.5 -apple-system,'Segoe UI','PingFang SC',sans-serif;` +
+    `color:#0f172a;background:#fff;word-break:break-word}img{max-width:100%;height:auto}</style></head>` +
+    `<body>${html}</body></html>`
+  )
+}
 const creating = ref(false)
 const refreshing = ref(false)
 
@@ -280,10 +297,28 @@ onBeforeUnmount(() => window.clearInterval(timer))
             </button>
           </div>
           <template v-if="expanded === mail.id">
-            <pre class="body">{{ mail.body || '(正文为空)' }}</pre>
-            <button class="btn" type="button" @click="headersOf = headersOf === mail.id ? null : mail.id">
-              {{ headersOf === mail.id ? '收起邮件头' : '查看邮件头' }}
-            </button>
+            <iframe
+              v-if="mail.html && !plainOf.has(mail.id)"
+              class="html-body"
+              title="邮件正文"
+              sandbox="allow-popups allow-popups-to-escape-sandbox"
+              referrerpolicy="no-referrer"
+              :srcdoc="htmlDocument(mail.html, imagesOf.has(mail.id))"
+            ></iframe>
+            <pre v-else class="body">{{ mail.body || '(正文为空)' }}</pre>
+            <div class="body-actions">
+              <template v-if="mail.html">
+                <button class="btn" type="button" @click="flip(plainOf, mail.id)">
+                  {{ plainOf.has(mail.id) ? '显示 HTML' : '显示纯文本' }}
+                </button>
+                <button v-if="!plainOf.has(mail.id)" class="btn" type="button" @click="flip(imagesOf, mail.id)">
+                  {{ imagesOf.has(mail.id) ? '隐藏远程图片' : '显示远程图片' }}
+                </button>
+              </template>
+              <button class="btn" type="button" @click="headersOf = headersOf === mail.id ? null : mail.id">
+                {{ headersOf === mail.id ? '收起邮件头' : '查看邮件头' }}
+              </button>
+            </div>
             <pre v-if="headersOf === mail.id" class="body">{{ mail.headers || '(没有记录邮件头)' }}</pre>
           </template>
         </li>

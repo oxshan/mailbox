@@ -826,7 +826,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         if address:
             self.pull(address, 60)
         sql = (
-            "SELECT id, address, sender AS 'from', subject, body, headers, code AS verify_code, received_at,"
+            "SELECT id, address, sender AS 'from', subject, body, html, headers, code AS verify_code, received_at,"
             " read_at IS NOT NULL AS read"
             " FROM mails WHERE deleted_at IS NULL"
         )

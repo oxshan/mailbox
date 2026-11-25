@@ -21,6 +21,7 @@ export interface Mail {
   from: string
   subject: string
   body: string
+  html: string
   headers: string
   verify_code: string | null
   received_at: number

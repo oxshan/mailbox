@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 from email.utils import parsedate_to_datetime
 
-from extract import describe_headers, parse_mail
+from extract import describe_headers, html_to_text, parse_mail
 
 KINDS = ("outlook",)
 GRAPH_SCOPE = "https://graph.microsoft.com/.default"
@@ -186,7 +186,7 @@ def fetch_graph(cfg, account):
     for folder in GRAPH_FOLDERS:
         request = urllib.request.Request(
             "%s/me/mailFolders/%s/messages?%s" % (cfg.ms_graph_url.rstrip("/"), folder, query),
-            headers={"Authorization": "Bearer " + token, "Prefer": 'outlook.body-content-type="text"'},
+            headers={"Authorization": "Bearer " + token},
         )
         for item in _request("Microsoft Graph", request).get("value", []):
             headers = [(h.get("name", ""), h.get("value", "")) for h in item.get("internetMessageHeaders") or []]
@@ -195,7 +195,12 @@ def fetch_graph(cfg, account):
                 headers += [("To", _graph_address(entry)) for entry in item.get("toRecipients") or []]
                 headers += [("Cc", _graph_address(entry)) for entry in item.get("ccRecipients") or []]
             mail = describe_headers(headers)
-            mail.update(plain=((item.get("body") or {}).get("content") or "").strip(), rich="", markup="", attachments=0)
+            body = item.get("body") or {}
+            content = body.get("content") or ""
+            if str(body.get("contentType", "")).lower() == "html":
+                mail.update(plain="", rich=html_to_text(content), markup=content, attachments=0)
+            else:
+                mail.update(plain=content.strip(), rich="", markup="", attachments=0)
             messages.append(
                 {"remote_id": str(item.get("id", "")), "received_at": _graph_time(item.get("receivedDateTime")), "mail": mail}
             )

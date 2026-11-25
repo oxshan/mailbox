@@ -991,6 +991,7 @@ class EndToEndTest(unittest.TestCase):
                 self.graph_message("m1", "Old code", "Your verification code is 410001", received="2026-11-01T08:00:00Z"),
                 self.graph_message("m2", "New code", "Your verification code is 410002", headers=False),
             ]
+            state["inbox"][1]["body"] = {"contentType": "html", "content": "<p>Your verification code is <b>410002</b></p>"}
             state["junkemail"] = [self.graph_message("m3", "Junk", "no code here", received="2026-11-02T08:00:00Z")]
             sync = "/api/accounts/%d/sync" % me["id"]
             self.assertEqual(self.api(sync, method="POST"), {"fetched": 3, "new": 3, "channel": "graph"})
@@ -1001,6 +1002,9 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual([m["subject"] for m in mails], ["New code", "Junk", "Old code"])
             self.assertEqual(mails[0]["from"], "GitHub <noreply@github.com>")
             self.assertIn("To: me@outlook.com", mails[0]["headers"])
+            self.assertEqual(mails[0]["html"], "<p>Your verification code is <b>410002</b></p>")
+            self.assertEqual(mails[0]["body"], "Your verification code is 410002")
+            self.assertEqual(mails[1]["html"], "")
             self.assertLess(mails[2]["received_at"], mails[0]["received_at"])
             self.assertEqual(self.code("me@outlook.com")["verify_code"], "410002")
             listed = {a["address"]: a for a in self.api("/api/accounts")["accounts"]}["me@outlook.com"]
@@ -1096,6 +1100,8 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(self.code(address)["verify_code"], "864209")
         mails = self.api("/api/mails?address=" + address)["mails"]
         self.assertEqual([m["verify_code"] for m in mails], ["864209", "135790"])
+        self.assertIn("<b>864209</b>", mails[0]["html"])
+        self.assertEqual(mails[1]["html"], "")
         boxes = {b["address"]: b for b in self.api("/api/mailboxes")["mailboxes"]}
         self.assertEqual(boxes[address]["mail_count"], 2)
         self.assertGreaterEqual(self.api("/api/stats")["codes"], 2)

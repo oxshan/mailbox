@@ -9,6 +9,8 @@ import time
 from extract import extract_for
 
 DEFAULT_SCENARIO = "default"
+# Longer HTML bodies (newsletters with inlined images) are cut; the text version is always kept whole.
+MAX_HTML_CHARS = 512 * 1024
 # Raised when the layout changes in a way existing files cannot be upgraded to.
 SCHEMA_VERSION = 2
 
@@ -88,6 +90,7 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.executescript("PRAGMA journal_mode=WAL;" + _SCHEMA + "PRAGMA user_version = %d;" % SCHEMA_VERSION)
         self.add_column("mailboxes", "account_id", "INTEGER")
+        self.add_column("mails", "html", "TEXT NOT NULL DEFAULT ''")
         self.execute(
             "INSERT OR IGNORE INTO scenarios (key, name, created_at) VALUES (?, '默认场景', ?)",
             (DEFAULT_SCENARIO, time.time()),
@@ -258,14 +261,15 @@ class Store:
             )
             self.db.execute("UPDATE mailboxes SET deleted_at = NULL WHERE address = ?", (address,))
             self.db.execute(
-                "INSERT INTO mails (address, sender, subject, body, alt, headers, code, received_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO mails (address, sender, subject, body, alt, html, headers, code, received_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     address,
                     mail["sender"],
                     mail["subject"],
                     mail["plain"] or mail["rich"],
                     mail["rich"] if mail["plain"] else "",
+                    (mail.get("markup") or "")[:MAX_HTML_CHARS],
                     mail["headers"],
                     code,
                     now,
