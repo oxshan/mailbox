@@ -180,6 +180,8 @@ export const getKey = () => localStorage.getItem(KEY_STORAGE) ?? ''
 export const setKey = (key: string) => localStorage.setItem(KEY_STORAGE, key)
 export const clearKey = () => localStorage.removeItem(KEY_STORAGE)
 
+const paging = (limit: number, offset: number) => ({ limit: String(limit), offset: String(offset) })
+
 interface RequestOptions {
   method?: string
   params?: Record<string, string>
@@ -208,9 +210,14 @@ export const api = {
   deleteDomain: (id: number) => request<{ id: number }>(`domains/${id}`, { method: 'DELETE' }),
   checkDomain: (name: string) => request<DomainCheck>('domains/check', { method: 'POST', body: { name } }),
   stats: () => request<Stats>('stats'),
-  mailboxes: () => request<{ mailboxes: Mailbox[] }>('mailboxes').then((r) => r.mailboxes),
-  mails: (address: string) =>
-    request<{ mails: Mail[] }>('mails', { params: address ? { address } : {} }).then((r) => r.mails),
+  mailboxes: (q: string, limit: number, offset: number) =>
+    request<{ mailboxes: Mailbox[]; total: number }>('mailboxes', {
+      params: { ...(q ? { q } : {}), ...paging(limit, offset) },
+    }),
+  mails: (address: string, limit: number, offset: number) =>
+    request<{ mails: Mail[]; total: number }>('mails', {
+      params: { ...(address ? { address } : {}), ...paging(limit, offset) },
+    }),
   markRead: (id: number) => request<{ id: number }>(`mails/${id}/read`, { method: 'POST' }),
   createMailbox: (scenario: string, source: number | null) =>
     request<Mailbox>('mailboxes', { method: 'POST', body: source === null ? { scenario } : { scenario, source } }),
@@ -226,7 +233,8 @@ export const api = {
   deleteSource: (id: number) => request<{ id: number }>(`sources/${id}`, { method: 'DELETE' }),
   checkSource: (id: number) => request<SourceCheck>(`sources/${id}/check`, { method: 'POST' }),
 
-  sent: () => request<{ configured: boolean; mails: SentMail[] }>('sent'),
+  sent: (limit: number, offset: number) =>
+    request<{ configured: boolean; mails: SentMail[]; total: number }>('sent', { params: paging(limit, offset) }),
   send: (input: SendInput) => request<{ id: number }>('send', { method: 'POST', body: input }),
 
   forwards: () => request<{ configured: boolean; hourly_limit: number; forwards: Forward[] }>('forwards'),

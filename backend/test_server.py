@@ -1283,5 +1283,64 @@ class EndToEndTest(unittest.TestCase):
         self.api("/api/scenarios/%d" % scenario["id"], method="DELETE")
 
 
+    def test_lists_are_paged_and_mailboxes_are_searched_by_address(self):
+        for name in ("pgtest-a", "pgtest-b", "pgtest-c"):
+            self.send(name + "@a.test", "Hello " + name, "code 1234")
+        self.send("pgtest-a@a.test", "Second", "code 5678")
+        self.send("pgtest-a@a.test", "Third", "code 9012")
+
+        first = self.api("/api/mailboxes?q=PGTEST&limit=2")
+        self.assertEqual((len(first["mailboxes"]), first["total"]), (2, 3))
+        rest = self.api("/api/mailboxes?q=pgtest&limit=2&offset=2")
+        self.assertEqual((len(rest["mailboxes"]), rest["total"]), (1, 3))
+        seen = [b["address"] for b in first["mailboxes"] + rest["mailboxes"]]
+        self.assertEqual(sorted(seen), ["pgtest-a@a.test", "pgtest-b@a.test", "pgtest-c@a.test"])
+        self.assertEqual(seen[0], "pgtest-a@a.test")
+        self.assertEqual(self.api("/api/mailboxes?q=pgtest-b@")["total"], 1)
+        self.assertEqual(self.api("/api/mailboxes?q=pgtest_a")["total"], 0)
+        self.assertEqual(self.api("/api/mailboxes?q=%25gtest")["total"], 0)
+        self.assertGreaterEqual(self.api("/api/mailboxes?limit=1")["total"], 3)
+
+        page = self.api("/api/mails?address=pgtest-a@a.test&limit=2")
+        self.assertEqual(([m["subject"] for m in page["mails"]], page["total"]), (["Third", "Second"], 3))
+        page = self.api("/api/mailboxes/pgtest-a@a.test/mails?limit=2&offset=2")
+        self.assertEqual(([m["subject"] for m in page["mails"]], page["total"]), (["Hello pgtest-a"], 3))
+        everything = self.api("/api/mails?limit=1&offset=1")
+        self.assertEqual(everything["mails"][0]["subject"], "Second")
+        self.assertGreaterEqual(everything["total"], 5)
+
+        cfg = self.app.cfg
+        cfg.resend_api_key, original_url = "re_test", cfg.resend_api_url
+        cfg.resend_api_url = "http://127.0.0.1:1/emails"
+        try:
+            for subject in ("pg1", "pg2", "pg3"):
+                self.api_error("/api/send", method="POST", body={"from": "a@a.test", "to": "x@example.com", "subject": subject, "text": "t"})
+        finally:
+            cfg.resend_api_key, cfg.resend_api_url = "", original_url
+        sent = self.api("/api/sent?limit=2")
+        self.assertEqual([m["subject"] for m in sent["mails"]], ["pg3", "pg2"])
+        self.assertGreaterEqual(sent["total"], 3)
+        self.assertEqual(self.api("/api/sent?limit=2&offset=2")["mails"][0]["subject"], "pg1")
+        self.app.store.execute("UPDATE sent_mails SET deleted_at = 1 WHERE subject IN ('pg1', 'pg2', 'pg3')")
+        self.assertEqual(self.api_error("/api/mails?offset=-1")[0], 400)
+
+    def test_zero_retention_keeps_mail_forever(self):
+        cfg, store = self.app.cfg, self.app.store
+        self.send("forever@a.test", "Old", "code 445566")
+        store.execute("UPDATE mails SET received_at = received_at - 7200 WHERE address = 'forever@a.test'")
+        store.execute("UPDATE mailboxes SET created_at = created_at - 7200 WHERE address = 'forever@a.test'")
+        original = cfg.retention_hours
+        try:
+            cfg.retention_hours = 0
+            self.app.purge_once()
+            self.assertEqual(self.api("/api/mails?address=forever@a.test")["total"], 1)
+            self.assertEqual(self.api("/api/mailboxes?q=forever@a.test")["total"], 1)
+            cfg.retention_hours = 1
+            self.app.purge_once()
+            self.assertEqual(self.api("/api/mails?address=forever@a.test")["total"], 0)
+        finally:
+            cfg.retention_hours = original
+
+
 if __name__ == "__main__":
     unittest.main()

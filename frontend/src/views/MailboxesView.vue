@@ -2,9 +2,12 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api, type Domain, type Mail, type Mailbox, type Scenario, type Source, type Stats } from '../api'
 import Icon from '../Icon.vue'
+import Pager from '../Pager.vue'
 import { copy, fail, formatTime } from '../ui'
 
 const REFRESH_MS = 5000
+const PAGE_SIZE = 50
+const SEARCH_DELAY_MS = 250
 
 const stats = ref<Stats | null>(null)
 const scenarios = ref<Scenario[]>([])
@@ -15,6 +18,11 @@ const mails = ref<Mail[]>([])
 const selected = ref('')
 const expanded = ref<number | null>(null)
 const filter = ref('')
+const keyword = ref('')
+const boxPage = ref(1)
+const boxTotal = ref(0)
+const mailPage = ref(1)
+const mailTotal = ref(0)
 const scenario = ref('default')
 const source = ref<number | null>(null)
 const headersOf = ref<number | null>(null)
@@ -39,6 +47,8 @@ const creating = ref(false)
 const refreshing = ref(false)
 
 let timer: number | undefined
+let searchTimer: number | undefined
+let latest = 0
 
 const statCards = computed(() => [
   { icon: 'globe', label: '域名', value: stats.value?.domains },
@@ -47,37 +57,44 @@ const statCards = computed(() => [
   { icon: 'shield', label: '验证码', value: stats.value?.codes },
 ] as const)
 
-const visibleBoxes = computed(() => {
-  const keyword = filter.value.trim().toLowerCase()
-  if (!keyword) return mailboxes.value
-  return mailboxes.value.filter((box) =>
-    [box.address, box.scenario_name ?? '', box.source_name ?? ''].some((text) => text.toLowerCase().includes(keyword)),
-  )
-})
+const lastPage = (total: number) => Math.max(1, Math.ceil(total / PAGE_SIZE))
 
 async function refresh() {
+  const request = ++latest
   refreshing.value = true
   try {
     const [nextStats, nextBoxes, nextMails] = await Promise.all([
       api.stats(),
-      api.mailboxes(),
-      api.mails(selected.value),
+      api.mailboxes(keyword.value, PAGE_SIZE, (boxPage.value - 1) * PAGE_SIZE),
+      api.mails(selected.value, PAGE_SIZE, (mailPage.value - 1) * PAGE_SIZE),
     ])
+    if (request !== latest) return
     stats.value = nextStats
-    mailboxes.value = nextBoxes
-    mails.value = nextMails
+    mailboxes.value = nextBoxes.mailboxes
+    boxTotal.value = nextBoxes.total
+    mails.value = nextMails.mails
+    mailTotal.value = nextMails.total
+    boxPage.value = Math.min(boxPage.value, lastPage(boxTotal.value))
+    mailPage.value = Math.min(mailPage.value, lastPage(mailTotal.value))
   } catch (err) {
-    fail(err, '刷新失败')
+    if (request === latest) fail(err, '刷新失败')
   } finally {
-    refreshing.value = false
+    if (request === latest) refreshing.value = false
   }
+}
+
+function showFirst(page: typeof boxPage) {
+  if (page.value === 1) refresh()
+  else page.value = 1
 }
 
 async function createMailbox() {
   creating.value = true
   try {
     const box = await api.createMailbox(scenario.value, source.value)
-    filter.value = ''
+    window.clearTimeout(searchTimer)
+    filter.value = keyword.value = ''
+    boxPage.value = 1
     selected.value = box.address
     await copy(box.address, `已生成并复制 ${box.address}`)
   } catch (err) {
@@ -112,7 +129,16 @@ function copyCode(mail: Mail) {
 
 watch(selected, () => {
   expanded.value = null
-  refresh()
+  showFirst(mailPage)
+})
+watch(mailPage, () => (expanded.value = null))
+watch([boxPage, mailPage], refresh)
+watch(filter, (text) => {
+  window.clearTimeout(searchTimer)
+  searchTimer = window.setTimeout(() => {
+    keyword.value = text.trim()
+    showFirst(boxPage)
+  }, SEARCH_DELAY_MS)
 })
 
 onMounted(async () => {
@@ -126,7 +152,10 @@ onMounted(async () => {
     if (!document.hidden) refresh()
   }, REFRESH_MS)
 })
-onBeforeUnmount(() => window.clearInterval(timer))
+onBeforeUnmount(() => {
+  window.clearInterval(timer)
+  window.clearTimeout(searchTimer)
+})
 </script>
 
 <template>
@@ -169,8 +198,8 @@ onBeforeUnmount(() => window.clearInterval(timer))
       </div>
       <div class="search">
         <Icon name="search" />
-        <label class="sr-only" for="filter">筛选邮箱</label>
-        <input id="filter" v-model="filter" type="search" placeholder="按地址或场景筛选" />
+        <label class="sr-only" for="filter">搜索邮箱</label>
+        <input id="filter" v-model="filter" type="search" placeholder="按地址搜索" />
       </div>
       <ul class="list">
         <li>
@@ -180,7 +209,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
             <span class="box-count">共 {{ stats?.mails ?? 0 }} 封</span>
           </button>
         </li>
-        <li v-for="box in visibleBoxes" :key="box.address">
+        <li v-for="box in mailboxes" :key="box.address">
           <button
             class="box"
             :class="{ active: selected === box.address }"
@@ -201,10 +230,11 @@ onBeforeUnmount(() => window.clearInterval(timer))
             </span>
           </button>
         </li>
-        <li v-if="!visibleBoxes.length" class="empty">
-          {{ mailboxes.length ? '没有匹配的邮箱' : '还没有邮箱，点上方按钮生成' }}
+        <li v-if="!mailboxes.length" class="empty">
+          {{ keyword ? '没有匹配的邮箱' : '还没有邮箱，点上方按钮生成' }}
         </li>
       </ul>
+      <Pager v-model:page="boxPage" :size="PAGE_SIZE" :total="boxTotal" />
     </aside>
 
     <section class="panel" aria-label="邮件列表">
@@ -216,7 +246,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
         <button class="icon-btn" type="button" title="刷新邮件" aria-label="刷新邮件" @click="refresh">
           <Icon name="refresh" :class="{ spin: refreshing }" />
         </button>
-        <span class="count">{{ mails.length }} 封</span>
+        <span class="count">{{ mailTotal }} 封</span>
       </div>
       <ul v-if="mails.length" class="list">
         <li v-for="mail in mails" :key="mail.id" class="mail" :class="{ open: expanded === mail.id, read: mail.read }">
@@ -280,6 +310,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
         <p>暂无邮件</p>
         <p v-if="selected">向 <span class="mono">{{ selected }}</span> 发信后会自动出现在这里</p>
       </div>
+      <Pager v-model:page="mailPage" :size="PAGE_SIZE" :total="mailTotal" />
     </section>
   </div>
 </template>

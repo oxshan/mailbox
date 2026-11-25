@@ -602,6 +602,34 @@ select:hover {
   white-space: nowrap;
 }
 
+.pager {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-top: 1px solid var(--border-2);
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.pager .prev .icon {
+  transform: rotate(90deg);
+}
+
+.pager .next .icon {
+  transform: rotate(-90deg);
+}
+
+.pager .icon-btn:disabled {
+  background: none;
+  color: var(--muted);
+  opacity: 0.4;
+}
+
 /* mails */
 
 .mail + .mail {

@@ -205,9 +205,13 @@ class MailApp:
         self.loop.run_until_complete(server.wait_closed())
         self.loop.close()
 
+    def purge_once(self):
+        if self.cfg.retention_hours > 0:
+            self.store.purge(self.cfg.retention_hours * 3600)
+
     def run_purge(self):
         while not self.stopped.wait(600):
-            self.store.purge(self.cfg.retention_hours * 3600)
+            self.purge_once()
 
     def start(self):
         handler = type("Handler", (ApiHandler,), {"app": self})

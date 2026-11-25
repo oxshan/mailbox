@@ -1,21 +1,27 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, reactive, ref, watch } from 'vue'
 import { api, type Domain, type SentMail } from '../api'
 import Icon from '../Icon.vue'
+import Pager from '../Pager.vue'
 import { fail, formatTime, notify } from '../ui'
+
+const PAGE_SIZE = 50
 
 const domains = ref<Domain[]>([])
 const mails = ref<SentMail[]>([])
 const configured = ref(true)
 const sending = ref(false)
 const expanded = ref<number | null>(null)
+const page = ref(1)
+const total = ref(0)
 const form = reactive({ local: '', domain: '', from_name: '', to: '', subject: '', text: '' })
 
 async function loadSent() {
   try {
-    const result = await api.sent()
+    const result = await api.sent(PAGE_SIZE, (page.value - 1) * PAGE_SIZE)
     configured.value = result.configured
     mails.value = result.mails
+    total.value = result.total
   } catch (err) {
     fail(err, '加载失败')
   }
@@ -37,9 +43,15 @@ async function send() {
     fail(err, '发送失败')
   } finally {
     sending.value = false
-    await loadSent()
+    if (page.value === 1) await loadSent()
+    else page.value = 1
   }
 }
+
+watch(page, () => {
+  expanded.value = null
+  loadSent()
+})
 
 onMounted(async () => {
   try {
@@ -111,6 +123,7 @@ onMounted(async () => {
           <p>还没有发件记录</p>
         </div>
       </div>
+      <Pager v-model:page="page" :size="PAGE_SIZE" :total="total" />
     </section>
 
     <form class="panel form" @submit.prevent="send">

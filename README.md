@@ -19,7 +19,7 @@
 - **域名管理**：在看板里增删、启用、停用域名，立即生效，并可检测 MX 记录是否指向本机
 - **发送邮件**：配置 Resend 后，可以用已添加域名下的任意地址作为发件人发信，并保留发件记录
 - **邮件转发**：在看板里添加转发邮箱并逐个开关，收到的邮件会同时通过 Resend 转发过去
-- **自动清理**：收到和发出的邮件默认保留 24 小时；外部来源的邮箱和停用的邮箱本身不会被清理
+- **自动清理**：收到和发出的邮件默认保留 24 小时，`RETENTION_HOURS=0` 则永久保留；外部来源的邮箱和停用的邮箱本身不会被清理
 
 ## 快速开始
 
@@ -82,7 +82,7 @@ MAIL_DOMAINS=a.com,b.com API_KEY=你的密钥 python3 server.py
 | `SMTP_HOST` / `HTTP_HOST` | `0.0.0.0` | 监听地址 |
 | `DATA_DIR` | `backend/data` | 数据库和密钥文件所在目录 |
 | `STATIC_DIR` | `frontend/dist` | 看板静态文件目录 |
-| `RETENTION_HOURS` | `24` | 邮件保留时长（小时） |
+| `RETENTION_HOURS` | `24` | 邮件保留时长（小时）；`0` 表示不自动清理，永久保留 |
 | `RESEND_API_KEY` | 空 | Resend 的 API Key。留空则不启用发信 |
 | `FORWARD_HOURLY_LIMIT` | `60` | 每小时最多转发的邮件数，超出的只收不转；`0` 表示不限制 |
 | `MS_CLIENT_ID` | Thunderbird 的公开编号 | 授权添加 Outlook 账号时使用的微软应用编号。换成自己注册的应用时，要在应用里打开“允许公共客户端流” |
@@ -331,7 +331,7 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 
 成功返回 `{"id": 1, "provider_id": "Resend 返回的邮件 ID"}`。Resend 拒绝或连接失败时返回 `424` 和错误原因，这次尝试也会记入发件记录。
 
-`GET /api/sent`（参数 `limit`，默认 50，上限 200）返回 `{"configured": 是否已配置发信, "mails": [...]}`。每条记录含 `id`、`from`、`to`、`subject`、`body`、`status`（`sent` 或 `failed`）、`error`、`kind`（`send` 手动发送，`forward` 自动转发）、`created_at`。
+`GET /api/sent`（参数 `limit`，默认 50，上限 200；`offset`，默认 0）返回 `{"configured": 是否已配置发信, "mails": [...], "total": 记录总数}`。每条记录含 `id`、`from`、`to`、`subject`、`body`、`status`（`sent` 或 `failed`）、`error`、`kind`（`send` 手动发送，`forward` 自动转发）、`created_at`。
 
 `sent` 表示 Resend 已接受这封邮件，不代表已送达收件人。
 
@@ -357,12 +357,12 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 
 | 方法 | 路径 | 参数 | 返回 |
 |---|---|---|---|
-| GET | `/api/mailboxes` | `scenario`（场景标识）、`source`（来源 ID，或 `domain` 表示自有域名）、`active`（`true` / `false`）、`limit`（默认 100，上限 500），都可选 | `{"mailboxes": [...]}` |
+| GET | `/api/mailboxes` | `scenario`（场景标识）、`source`（来源 ID，或 `domain` 表示自有域名）、`active`（`true` / `false`）、`q`（地址包含的文字，不分大小写）、`limit`（默认 100，上限 500）、`offset`（默认 0），都可选 | `{"mailboxes": [...], "total": 符合条件的总数}` |
 | GET | `/api/mailboxes/{address}` | 无 | 一个邮箱对象 |
 | PUT | `/api/mailboxes/{address}` | `active`（必填，`true` 启用，`false` 停用） | `{"address", "active", "synced"}` |
 | DELETE | `/api/mailboxes/{address}` | 无 | `{"address", "synced"}` |
-| GET | `/api/mailboxes/{address}/mails` | `limit`（默认 50，上限 200） | `{"mails": [...]}` |
-| GET | `/api/mails` | `address`（可选，不传返回全部）、`limit` | `{"mails": [...]}` |
+| GET | `/api/mailboxes/{address}/mails` | `limit`（默认 50，上限 200）、`offset`（默认 0） | `{"mails": [...], "total": 邮件总数}` |
+| GET | `/api/mails` | `address`（可选，不传返回全部）、`limit`、`offset` | `{"mails": [...], "total": 邮件总数}` |
 | POST | `/api/mails/{id}/read` | 无 | 把一封邮件标为已读，返回 `{"id", "read": true}` |
 | GET | `/api/stats` | 无 | 统计数字 |
 

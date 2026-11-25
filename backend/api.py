@@ -41,6 +41,14 @@ _MAILBOXES = (
 )
 
 
+def page_of(params, default, most):
+    limit = min(max(int(params.get("limit", default)), 1), most)
+    offset = int(params.get("offset", 0))
+    if offset < 0:
+        raise ValueError("offset 不能为负数")
+    return limit, offset
+
+
 def as_bool(value):
     if isinstance(value, str):
         return value.strip().lower() in ("1", "true", "yes", "on")
@@ -652,11 +660,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         store.reparse([store.default_scenario_id])
         self.send_json(200, {"id": scenario_id})
 
-    def mailbox_rows(self, where="", args=(), limit=1):
+    def mailbox_rows(self, where="", args=(), limit=1, offset=0):
         rows = self.app.store.query(
             _MAILBOXES + where + " GROUP BY b.address"
-            " ORDER BY COALESCE(MAX(m.received_at), b.created_at) DESC LIMIT ?",
-            tuple(args) + (limit,),
+            " ORDER BY COALESCE(MAX(m.received_at), b.created_at) DESC LIMIT ? OFFSET ?",
+            tuple(args) + (limit, offset),
         )
         for row in rows:
             row["active"] = bool(row["active"])
@@ -676,11 +684,14 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_json(200, rows[0])
 
     def list_mailboxes(self, params):
-        limit = min(max(int(params.get("limit", 100)), 1), 500)
+        limit, offset = page_of(params, 100, 500)
         where, args = "", []
         scenario = str(params.get("scenario", "")).strip().lower()
         source = str(params.get("source", "")).strip().lower()
         active = str(params.get("active", "")).strip()
+        keyword = str(params.get("q", "")).strip().lower()
+        if keyword:
+            where, args = where + " AND instr(b.address, ?) > 0", args + [keyword]
         if scenario:
             where, args = where + " AND s.key = ?", args + [scenario]
         if source == "domain":
@@ -691,7 +702,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             where, args = where + " AND b.source_id = ?", args + [int(source)]
         if active:
             where, args = where + " AND b.active = ?", args + [int(as_bool(active))]
-        self.send_json(200, {"mailboxes": self.mailbox_rows(where, args, limit)})
+        total = self.app.store.query(
+            "SELECT COUNT(*) AS n FROM mailboxes b LEFT JOIN scenarios s ON s.id = b.scenario_id"
+            " WHERE b.deleted_at IS NULL" + where,
+            args,
+        )[0]["n"]
+        self.send_json(200, {"mailboxes": self.mailbox_rows(where, args, limit, offset), "total": total})
 
     def pick_source(self, scenario_id, params):
         """The external source a new mailbox comes from, or None for one of our own domains.
@@ -834,21 +850,21 @@ class ApiHandler(BaseHTTPRequestHandler):
                 pass
 
     def send_mails(self, params, address=""):
-        limit = min(max(int(params.get("limit", 50)), 1), 200)
+        limit, offset = page_of(params, 50, 200)
         if address:
             self.pull(address, 60)
-        sql = (
-            "SELECT id, address, sender AS 'from', subject, body, html, headers, code AS verify_code, received_at,"
-            " read_at IS NOT NULL AS read"
-            " FROM mails WHERE deleted_at IS NULL"
-        )
+        where, args = " FROM mails WHERE deleted_at IS NULL", ()
         if address:
-            rows = self.app.store.query(sql + " AND address = ? ORDER BY id DESC LIMIT ?", (address, limit))
-        else:
-            rows = self.app.store.query(sql + " ORDER BY id DESC LIMIT ?", (limit,))
+            where, args = where + " AND address = ?", (address,)
+        rows = self.app.store.query(
+            "SELECT id, address, sender AS 'from', subject, body, html, headers, code AS verify_code, received_at,"
+            " read_at IS NOT NULL AS read" + where + " ORDER BY id DESC LIMIT ? OFFSET ?",
+            args + (limit, offset),
+        )
         for row in rows:
             row["read"] = bool(row["read"])
-        self.send_json(200, {"mails": rows})
+        total = self.app.store.query("SELECT COUNT(*) AS n" + where, args)[0]["n"]
+        self.send_json(200, {"mails": rows, "total": total})
 
     def get_mails(self, params, item=None, action=None):
         if item is not None:
@@ -863,13 +879,14 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_json(200, {"id": mail_id, "read": True})
 
     def get_sent(self, params, item=None):
-        limit = min(max(int(params.get("limit", 50)), 1), 200)
+        limit, offset = page_of(params, 50, 200)
         rows = self.app.store.query(
             "SELECT id, sender AS 'from', recipients AS 'to', subject, body, status, error, kind, created_at"
-            " FROM sent_mails WHERE deleted_at IS NULL ORDER BY id DESC LIMIT ?",
-            (limit,),
+            " FROM sent_mails WHERE deleted_at IS NULL ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         )
-        self.send_json(200, {"configured": bool(self.app.cfg.resend_api_key), "mails": rows})
+        total = self.app.store.query("SELECT COUNT(*) AS n FROM sent_mails WHERE deleted_at IS NULL")[0]["n"]
+        self.send_json(200, {"configured": bool(self.app.cfg.resend_api_key), "mails": rows, "total": total})
 
     def post_send(self, params, item=None):
         cfg, store = self.app.cfg, self.app.store
