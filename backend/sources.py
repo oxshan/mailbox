@@ -35,11 +35,13 @@ def call(label, method, url, token, body=None, agent="mailbox/1.0"):
         with urllib.request.urlopen(request, timeout=20) as response:
             raw = response.read()
     except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace").strip()
         try:
-            detail = json.loads(exc.read())
+            detail = json.loads(raw)
             detail = detail.get("message") or detail.get("error")
         except (ValueError, AttributeError):
-            detail = None
+            # addy.io answers some refusals, such as a plan limit, in plain text.
+            detail = raw[:200] if raw and not raw.startswith("<") else None
         if exc.code in (401, 403) and not detail:
             detail = "令牌无效或已过期"
         elif exc.code == 429 and not detail:

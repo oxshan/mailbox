@@ -428,7 +428,7 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual((sent["subject"], sent["text"]), ("Hi", "body"))
 
             code, message = self.api_error("/api/send", method="POST", body=dict(mail, subject="reject"))
-            self.assertEqual(code, 502)
+            self.assertEqual(code, 424)
             self.assertIn("domain is not verified", message)
 
             for bad in ({"from": "a@evil.test"}, {"to": "not-an-address"}, {"to": ""}, {"subject": " "}, {"text": ""}):
@@ -442,7 +442,7 @@ class EndToEndTest(unittest.TestCase):
             self.assertIn("domain is not verified", listed["mails"][0]["error"])
 
             cfg.resend_api_url = "http://127.0.0.1:1/emails"
-            self.assertEqual(self.api_error("/api/send", method="POST", body=mail)[0], 502)
+            self.assertEqual(self.api_error("/api/send", method="POST", body=mail)[0], 424)
         finally:
             cfg.resend_api_key = ""
             fake.shutdown()
@@ -506,6 +506,12 @@ class EndToEndTest(unittest.TestCase):
                 if path == "/addy/aliases" and self.command == "POST":
                     if state["limited"]:
                         return self.reply(429, {"message": "You have reached your hourly limit for creating new aliases"})
+                    if state.get("plain"):
+                        body = b"You've reached your recipient limit"
+                        self.send_response(403)
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        return self.wfile.write(body)
                     number = len(state["aliases"]) + 1
                     alias = {"id": "al-%d" % number, "email": "W%d@%s" % (number, body["domain"]), "active": True}
                     state["aliases"].append(alias)
@@ -630,10 +636,16 @@ class EndToEndTest(unittest.TestCase):
             state["limited"] = True
             before = len(self.boxes())
             status, message = self.api_error("/api/mailboxes", method="POST", body={"source": source})
-            self.assertEqual(status, 502)
+            self.assertEqual(status, 424)
             self.assertIn("hourly limit", message)
             self.assertEqual(len(self.boxes()), before)
             state["limited"] = False
+            state["plain"] = True
+            self.assertEqual(
+                self.api_error("/api/mailboxes", method="POST", body={"source": source}),
+                (424, "addy.io 返回 403：You've reached your recipient limit"),
+            )
+            state["plain"] = False
 
             self.api("/api/sources/%d" % source, method="PUT", body={"alias_domain": "me.anonaddy.com", "alias_format": "uuid"})
             self.assertEqual(self.new_box(source=source)["domain"], "me.anonaddy.com")
@@ -647,7 +659,7 @@ class EndToEndTest(unittest.TestCase):
             self.assertIsNone(self.code(box["address"])["verify_code"])
 
             self.api("/api/sources/%d" % source, method="PUT", body={"token": "addy_bad_token"})
-            self.assertEqual(self.api_error("/api/sources/%d/check" % source, method="POST"), (502, "addy.io 返回 401：Unauthenticated."))
+            self.assertEqual(self.api_error("/api/sources/%d/check" % source, method="POST"), (424, "addy.io 返回 401：Unauthenticated."))
         finally:
             self.close_sources(fake)
 
@@ -691,7 +703,7 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual(self.code(box["address"])["verify_code"], "810004")
 
             self.api("/api/sources/%d" % source, method="PUT", body={"token": "duck_bad_token"})
-            self.assertEqual(self.api_error("/api/mailboxes", method="POST", body={"source": source}), (502, "Duck 返回 401：令牌无效或已过期"))
+            self.assertEqual(self.api_error("/api/mailboxes", method="POST", body={"source": source}), (424, "Duck 返回 401：令牌无效或已过期"))
         finally:
             self.close_sources(fake)
 

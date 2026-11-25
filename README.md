@@ -143,7 +143,7 @@ Docker 方式下，`.env` 里的 `SMTP_PORT` 和 `HTTP_PORT` 指的是宿主机�
 注意：
 
 - 来源的令牌明文保存在数据库里，接口和后台只显示首尾各 4 位。
-- 两个服务都有额度和频率限制（addy 免费版每小时新建 10 个别名、每月 10 MB 转发流量；Duck 的令牌用得太频繁会被暂时封禁）。超限时生成接口返回 `502` 和对方给出的原因，不会改用别的来源。
+- 两个服务都有额度和频率限制（addy 免费版每小时新建 10 个别名、每月 10 MB 转发流量；Duck 的令牌用得太频繁会被暂时封禁）。超限时生成接口返回 `424` 和对方给出的原因，不会改用别的来源。
 - addy.io 的使用条款不允许用别名在其他网站批量注册账号。
 - 别名多一跳转发，邮件到达比自有域名慢，查验证码时 `wait` 要相应放宽。
 
@@ -198,7 +198,7 @@ invite code[:：]\s*([A-Z0-9]{4}-[A-Z0-9]{4})
   | 400 | 参数有误 |
   | 401 | API Key 缺失或错误 |
   | 404 | 接口或记录不存在 |
-  | 502 | 外部服务（Resend、addy.io、Duck）拒绝或连接失败 |
+  | 424 | 外部服务（Resend、addy.io、Duck）拒绝或连接失败 |
 
   ```json
   {"code": 400, "msg": "业务场景不存在：abc", "data": null}
@@ -312,7 +312,7 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   http://127.0.0.1:8080/api/send
 ```
 
-成功返回 `{"id": 1, "provider_id": "Resend 返回的邮件 ID"}`。Resend 拒绝或连接失败时返回 `502` 和错误原因，这次尝试也会记入发件记录。
+成功返回 `{"id": 1, "provider_id": "Resend 返回的邮件 ID"}`。Resend 拒绝或连接失败时返回 `424` 和错误原因，这次尝试也会记入发件记录。
 
 `GET /api/sent`（参数 `limit`，默认 50，上限 200）返回 `{"configured": 是否已配置发信, "mails": [...]}`。每条记录含 `id`、`from`、`to`、`subject`、`body`、`status`（`sent` 或 `failed`）、`error`、`kind`（`send` 手动发送，`forward` 自动转发）、`created_at`。
 
@@ -353,7 +353,7 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 
 停用和删除：
 
-- `synced` 表示这次操作是否同步到了外部来源。addy 的邮箱先改 addy 那边，成功后才改本系统；addy 那边失败时返回 `502`，本系统的状态不变。
+- `synced` 表示这次操作是否同步到了外部来源。addy 的邮箱先改 addy 那边，成功后才改本系统；addy 那边失败时返回 `424`，本系统的状态不变。
 - 停用的邮箱不再接收邮件：自有域名的地址在 SMTP 阶段直接拒收，外部别名转发过来的邮件被丢弃。
 - 删除自有域名或 Duck 的邮箱只是删掉本系统的记录，之后再有邮件发到这个地址，它会重新出现。
 
@@ -386,7 +386,7 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 
 列表项不含 `token`，另有 `token_mask`（首尾各 4 位）、`capabilities`（`create`、`toggle`、`delete` 中支持的几项）、`mailbox_count`、`scenario_count`、`created_at`。
 
-检测的 `status`：`ok` 可用；`pending` 令牌有效但收集地址还没在 addy 验证；`unknown` 无法校验（Duck）。令牌无效或连接失败时接口返回 `502`。对 addy 检测时，如果收集地址还不是它的收件人，会顺带把它加上。
+检测的 `status`：`ok` 可用；`pending` 令牌有效但收集地址还没在 addy 验证；`unknown` 无法校验（Duck）。令牌无效或连接失败时接口返回 `424`。对 addy 检测时，如果收集地址还不是它的收件人，会顺带把它加上。
 
 ### 业务场景
 

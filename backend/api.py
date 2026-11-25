@@ -18,6 +18,9 @@ from sources import SourceError
 from store import DEFAULT_SCENARIO
 
 MAX_FORWARDS = 20
+# An external service (Resend, addy.io, Duck) refused or could not be reached. Not 502 or 504:
+# a proxy such as Cloudflare replaces those responses with its own error page.
+UPSTREAM_FAILED = 424
 _DOMAIN = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]")
 # Resources with a third path segment: /api/mailboxes/<address>/code, /api/sources/<id>/check, ...
 _NESTED = ("mailboxes", "mails", "sources")
@@ -97,7 +100,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self.send_json(400, {"error": str(exc)})
         except SourceError as exc:
-            self.send_json(502, {"error": str(exc)})
+            self.send_json(UPSTREAM_FAILED, {"error": str(exc)})
 
     do_GET = do_POST = do_PUT = do_DELETE = route
 
@@ -697,7 +700,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             provider_id = send_via_resend(cfg, payload)
         except SendError as exc:
             store.insert(sql, row + ("failed", str(exc), "", time.time()))
-            return self.send_json(502, {"error": str(exc)})
+            return self.send_json(UPSTREAM_FAILED, {"error": str(exc)})
         new_id = store.insert(sql, row + ("sent", "", provider_id, time.time()))
         self.send_json(200, {"id": new_id, "provider_id": provider_id})
 
