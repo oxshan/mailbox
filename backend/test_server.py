@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import smtplib
@@ -14,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 from urllib.parse import parse_qs, quote, urlencode
 
+import accounts
 import mxcheck
 from config import Config
 from extract import compile_template, extract_code, extract_with_template, html_to_text, parse_mail
@@ -771,6 +773,226 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(self.api("/api/mailboxes/%s/mails" % address)["mails"], [])
         self.assertEqual(self.api_error("/api/mailboxes/%s/nope" % address)[0], 404)
         self.assertEqual(self.api_error("/api/domains/1/extra")[0], 404)
+
+    def fake_microsoft(self):
+        """Start a stand-in for Microsoft's token endpoint and Graph, and point the app at it."""
+        state = {"inbox": [], "junkemail": [], "tokens": 0, "graph_down": False, "device": "pending"}
+
+        class FakeMicrosoft(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def reply(self, status, payload):
+                body = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                form = parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode())
+                if self.path == "/devicecode":
+                    state["device_request"] = form
+                    reply = {"device_code": "dc-1", "user_code": "ABCD1234", "expires_in": 900, "interval": 1}
+                    return self.reply(200, dict(reply, verification_uri="https://login.microsoft.com/device"))
+                if "device_code" in form:
+                    if form["device_code"] != ["dc-1"] or state["device"] == "declined":
+                        detail = "AADSTS70016: The user declined.\r\nTrace ID: abc"
+                        return self.reply(400, {"error": "authorization_declined", "error_description": detail})
+                    if state["device"] == "pending":
+                        return self.reply(400, {"error": "authorization_pending", "error_description": "waiting"})
+                    claims = base64.urlsafe_b64encode(json.dumps({"email": state["device"]}).encode()).decode().rstrip("=")
+                    return self.reply(200, {"refresh_token": "rt-good-device", "id_token": "h.%s.sig" % claims})
+                if not form["refresh_token"][0].startswith("rt-good") or form["client_id"] != ["client-1"]:
+                    detail = "AADSTS70000: The refresh token is invalid.\r\nTrace ID: abc"
+                    return self.reply(400, {"error": "invalid_grant", "error_description": detail})
+                state["tokens"] += 1
+                state["scope"] = form["scope"][0]
+                self.reply(200, {"access_token": "at-1", "refresh_token": "rt-good-%d" % state["tokens"]})
+
+            def do_GET(self):
+                folder = self.path.split("/mailFolders/")[1].split("/")[0]
+                if state["graph_down"] or self.headers["Authorization"] != "Bearer at-1":
+                    return self.reply(403, {"error": {"code": "ErrorAccessDenied", "message": "Access is denied."}})
+                self.reply(200, {"value": state[folder]})
+
+        fake = ThreadingHTTPServer(("127.0.0.1", 0), FakeMicrosoft)
+        threading.Thread(target=fake.serve_forever, daemon=True).start()
+        cfg = self.app.cfg
+        base = "http://127.0.0.1:%d" % fake.server_address[1]
+        cfg.ms_token_url, cfg.ms_imap_token_url, cfg.ms_graph_url = base + "/token", base + "/token", base + "/graph"
+        cfg.ms_device_url = base + "/devicecode"
+        return fake, state
+
+    @staticmethod
+    def graph_message(remote_id, subject, body, to="me@outlook.com", received="2026-11-25T08:00:00Z", headers=True):
+        message = {
+            "id": remote_id,
+            "subject": subject,
+            "receivedDateTime": received,
+            "from": {"emailAddress": {"name": "GitHub", "address": "noreply@github.com"}},
+            "toRecipients": [{"emailAddress": {"name": to, "address": to}}],
+            "body": {"contentType": "text", "content": body},
+        }
+        if headers:
+            message["internetMessageHeaders"] = [
+                {"name": "From", "value": "GitHub <noreply@github.com>"},
+                {"name": "To", "value": to},
+                {"name": "Subject", "value": subject},
+            ]
+        return message
+
+    def test_outlook_authorization(self):
+        fake, state = self.fake_microsoft()
+        store = self.app.store
+        authorize = lambda **body: self.api("/api/accounts/authorize", method="POST", body=body)
+        try:
+            self.assertEqual(self.app.cfg.ms_client_id, "9e5f94bc-e8a4-4e73-b8be-63364c29d753")
+            started = authorize()
+            self.assertEqual((started["user_code"], started["interval"]), ("ABCD1234", 1))
+            self.assertEqual(started["verification_uri"], "https://login.microsoft.com/device")
+            self.assertEqual(state["device_request"]["client_id"], [self.app.cfg.ms_client_id])
+            self.assertIn("Mail.Read", state["device_request"]["scope"][0])
+            self.assertEqual(authorize(id=started["id"]), {"status": "pending"})
+            state["device"] = "New@Outlook.com"
+            self.assertEqual(authorize(id=started["id"]), {"status": "done", "address": "new@outlook.com", "added": True})
+            account = store.query("SELECT * FROM accounts WHERE address = 'new@outlook.com'")[0]
+            self.assertEqual((account["client_id"], account["refresh_token"]), (self.app.cfg.ms_client_id, "rt-good-device"))
+            self.assertEqual(self.boxes("&source=account")["new@outlook.com"]["source_kind"], "outlook")
+            self.assertIn("已过期", self.api_error("/api/accounts/authorize", method="POST", body={"id": started["id"]})[1])
+
+            store.execute("UPDATE accounts SET refresh_token = 'old', status = 'error', error = 'x' WHERE id = ?", (account["id"],))
+            again = authorize()
+            self.assertEqual(authorize(id=again["id"]), {"status": "done", "address": "new@outlook.com", "added": False})
+            renewed = store.account(account["id"])
+            self.assertEqual((renewed["refresh_token"], renewed["status"], renewed["error"]), ("rt-good-device", "", ""))
+
+            state["device"] = "declined"
+            declined = authorize()
+            status, message = self.api_error("/api/accounts/authorize", method="POST", body={"id": declined["id"]})
+            self.assertEqual((status, message), (424, "微软登录：AADSTS70016: The user declined."))
+            self.assertEqual(self.app.authorizations, {})
+            state["device"] = "x@a.test"
+            own = authorize()
+            self.assertIn("自有域名", self.api_error("/api/accounts/authorize", method="POST", body={"id": own["id"]})[1])
+        finally:
+            fake.shutdown()
+            fake.server_close()
+            store.execute("DELETE FROM accounts")
+            store.execute("DELETE FROM mailboxes WHERE account_id IS NOT NULL")
+
+    def test_outlook_account(self):
+        fake, state = self.fake_microsoft()
+        store = self.app.store
+        post = lambda **body: self.api_error("/api/accounts", method="POST", body=body)
+        good = {"address": "Me@Outlook.com", "client_id": "client-1", "refresh_token": "rt-good-0", "note": "主号"}
+        try:
+            self.assertEqual(post(**dict(good, kind="gmail"))[0], 400)
+            self.assertIn("格式不正确", post(**dict(good, address="nope"))[1])
+            self.assertIn("自有域名", post(**dict(good, address="x@a.test"))[1])
+            self.assertIn("缺少", post(**dict(good, refresh_token=""))[1])
+            self.assertIn("第 2 行", post(text="a@outlook.com----pw----c----t\nbroken line")[1])
+            self.assertEqual(self.api("/api/accounts", method="POST", body=good), {"added": ["me@outlook.com"], "skipped": []})
+            self.assertIn("已存在", post(**good)[1])
+            imported = self.api(
+                "/api/accounts",
+                method="POST",
+                body={"text": "me@outlook.com----pw----client-1----rt-good-0\n\nBad@Hotmail.com--------client-1----rt-bad----with----dashes\n"},
+            )
+            self.assertEqual(imported, {"added": ["bad@hotmail.com"], "skipped": ["me@outlook.com"]})
+            self.assertEqual(store.query("SELECT refresh_token FROM accounts WHERE address = 'bad@hotmail.com'")[0]["refresh_token"], "rt-bad----with----dashes")
+
+            listed = {a["address"]: a for a in self.api("/api/accounts")["accounts"]}
+            me, bad = listed["me@outlook.com"], listed["bad@hotmail.com"]
+            self.assertEqual((me["kind"], me["note"], me["enabled"], me["status"], me["token_mask"]), ("outlook", "主号", True, "", "rt-g…od-0"))
+            self.assertNotIn("refresh_token", me)
+            box = self.boxes("&source=account")["me@outlook.com"]
+            self.assertEqual((box["source_kind"], box["account"], box["source"], box["scenario"]), ("outlook", me["id"], None, "default"))
+            self.assertNotIn("me@outlook.com", self.boxes("&source=domain"))
+            self.assertEqual(self.api("/api/stats")["accounts"], 2)
+
+            state["inbox"] = [
+                self.graph_message("m1", "Old code", "Your verification code is 410001", received="2026-11-01T08:00:00Z"),
+                self.graph_message("m2", "New code", "Your verification code is 410002", headers=False),
+            ]
+            state["junkemail"] = [self.graph_message("m3", "Junk", "no code here", received="2026-11-02T08:00:00Z")]
+            sync = "/api/accounts/%d/sync" % me["id"]
+            self.assertEqual(self.api(sync, method="POST"), {"fetched": 3, "new": 3, "channel": "graph"})
+            self.assertEqual(state["scope"], "https://graph.microsoft.com/.default")
+            self.assertEqual(self.api(sync, method="POST")["new"], 0)
+            self.assertEqual(store.account(me["id"])["refresh_token"], "rt-good-2")
+            mails = self.api("/api/mailboxes/me@outlook.com/mails")["mails"]
+            self.assertEqual([m["subject"] for m in mails], ["New code", "Junk", "Old code"])
+            self.assertEqual(mails[0]["from"], "GitHub <noreply@github.com>")
+            self.assertIn("To: me@outlook.com", mails[0]["headers"])
+            self.assertLess(mails[2]["received_at"], mails[0]["received_at"])
+            self.assertEqual(self.code("me@outlook.com")["verify_code"], "410002")
+            listed = {a["address"]: a for a in self.api("/api/accounts")["accounts"]}["me@outlook.com"]
+            self.assertEqual((listed["status"], listed["channel"], listed["mail_count"]), ("ok", "graph", 3))
+
+            state["inbox"].append(self.graph_message("m4", "Fresh", "Your verification code is 410004", received="2026-11-25T09:00:00Z"))
+            store.execute("UPDATE accounts SET synced_at = synced_at - 60 WHERE id = ?", (me["id"],))
+            self.assertEqual(self.code("me@outlook.com")["verify_code"], "410004")
+            state["inbox"].append(self.graph_message("m5", "Too soon", "Your verification code is 410005", received="2026-11-25T09:01:00Z"))
+            self.assertEqual(self.code("me@outlook.com")["verify_code"], "410004")
+
+            store.execute("UPDATE mails SET received_at = 1 WHERE address = 'me@outlook.com'")
+            store.purge(3600)
+            self.assertEqual(len(self.api("/api/mails?address=me@outlook.com")["mails"]), 4)
+            self.assertIn("me@outlook.com", self.boxes())
+
+            source = self.api(
+                "/api/sources",
+                method="POST",
+                body={"kind": "duck", "name": "Duck 转 Outlook", "token": "duck_good_token_456", "collector": "me@outlook.com"},
+            )["id"]
+            self.assertIn("已接入的邮箱账号", self.api_error("/api/sources", method="POST", body={"kind": "duck", "name": "x", "token": "t", "collector": "other@outlook.com"})[1])
+            store.add_mailbox("calm-owl@duck.com", store.default_scenario_id, source)
+            state["inbox"].append(self.graph_message("m6", "Via alias", "Your verification code is 410006", to="Calm-Owl@duck.com", received="2026-11-25T09:02:00Z"))
+            store.execute("UPDATE accounts SET synced_at = synced_at - 60 WHERE id = ?", (me["id"],))
+            self.assertEqual(self.code("calm-owl@duck.com")["verify_code"], "410006")
+            self.assertEqual(self.boxes()["calm-owl@duck.com"]["source_kind"], "duck")
+            self.assertNotIn("Via alias", [m["subject"] for m in self.api("/api/mails?address=me@outlook.com")["mails"]])
+
+            bad_sync = "/api/accounts/%d/sync" % bad["id"]
+            status, message = self.api_error(bad_sync, method="POST")
+            self.assertEqual(status, 424)
+            self.assertIn("AADSTS70000: The refresh token is invalid.", message)
+            self.assertNotIn("Trace ID", message)
+            self.assertIn("改用 IMAP 也失败", message)
+            listed = {a["address"]: a for a in self.api("/api/accounts")["accounts"]}["bad@hotmail.com"]
+            self.assertEqual((listed["status"], listed["error"]), ("error", message))
+            self.assertIsNone(self.code("bad@hotmail.com")["verify_code"])
+
+            state["graph_down"] = True
+            relayed = {"remote_id": "<i1@x>", "received_at": time.time(), "mail": parse_mail(b"From: a@b.c\r\nTo: me@outlook.com\r\nSubject: Over IMAP\r\n\r\ncode 410007\r\n")}
+            with mock.patch.object(accounts, "fetch_imap", return_value=([relayed], "rt-imap")) as imap:
+                self.assertEqual(self.api(sync, method="POST"), {"fetched": 1, "new": 1, "channel": "imap"})
+                self.assertEqual(imap.call_count, 1)
+            self.assertEqual(store.account(me["id"])["refresh_token"], "rt-imap")
+            self.assertEqual(self.api("/api/mails?address=me@outlook.com")["mails"][0]["subject"], "Over IMAP")
+
+            self.api("/api/accounts/%d" % me["id"], method="PUT", body={"enabled": False, "note": "停用"})
+            edited = store.account(me["id"])
+            self.assertEqual((edited["enabled"], edited["note"], edited["refresh_token"]), (0, "停用", "rt-imap"))
+            self.api("/api/accounts/%d" % me["id"], method="PUT", body={"refresh_token": "rt-good-9"})
+            self.assertEqual(store.account(me["id"])["refresh_token"], "rt-good-9")
+
+            self.assertIn("邮箱账号", self.api_error("/api/mailboxes/me@outlook.com", method="DELETE")[1])
+            self.assertIn("Duck 转 Outlook", self.api_error("/api/accounts/%d" % me["id"], method="DELETE")[1])
+            store.execute("DELETE FROM mailboxes WHERE source_id = ?", (source,))
+            self.api("/api/sources/%d" % source, method="DELETE")
+            self.api("/api/accounts/%d" % me["id"], method="DELETE")
+            self.assertNotIn("me@outlook.com", self.boxes())
+            self.assertEqual(self.api_error("/api/accounts/%d" % me["id"], method="DELETE")[0], 404)
+            self.assertEqual(self.api_error("/api/accounts/%d/nope" % bad["id"], method="POST")[0], 404)
+        finally:
+            fake.shutdown()
+            fake.server_close()
+            for table in ("accounts", "account_seen", "sources"):
+                store.execute("DELETE FROM %s" % table)
+            store.execute("DELETE FROM mailboxes WHERE account_id IS NOT NULL OR source_id IS NOT NULL")
+            store.execute("DELETE FROM mails WHERE address LIKE '%@outlook.com' OR address LIKE '%@duck.com'")
 
     def test_requires_api_key(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:

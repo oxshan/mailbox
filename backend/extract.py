@@ -99,25 +99,35 @@ def _addresses(values):
     return found
 
 
-def parse_mail(raw):
-    """Parse a raw RFC822 message.
+def describe_headers(headers):
+    """The header-derived fields of a mail, from its (name, value) header list.
 
-    Besides the content, the result lists the addresses in the recipient headers ("recipients") and in the
-    X- headers ("mentions"); a forwarding service keeps the alias a mail was sent to in one of them.
+    "recipients" lists the addresses in the recipient headers and "mentions" those in the X- headers; a
+    forwarding service keeps the alias a mail was sent to in one of them.
     """
+    first = lambda wanted: next((value for name, value in headers if name.lower() == wanted), "")
+    return {
+        "sender": first("from"),
+        "subject": first("subject"),
+        "date": first("date"),
+        "message_id": first("message-id").strip(),
+        "headers": "\n".join("%s: %s" % header for header in headers)[:MAX_HEADER_CHARS],
+        "recipients": _addresses(
+            value for wanted in _RECIPIENT_HEADERS for name, value in headers if name.lower() == wanted
+        ),
+        "mentions": _addresses(value for name, value in headers if name.lower().startswith("x-")),
+    }
+
+
+def parse_mail(raw):
+    """Parse a raw RFC822 message into the fields of describe_headers plus its content."""
     msg = message_from_bytes(raw, policy=policy.default)
-    mail = {"plain": "", "rich": "", "markup": "", "attachments": 0}
     try:
         headers = [(name, str(value)) for name, value in msg.items()]
     except Exception:
         headers = []
-    mail["sender"] = next((value for name, value in headers if name.lower() == "from"), "")
-    mail["subject"] = next((value for name, value in headers if name.lower() == "subject"), "")
-    mail["headers"] = "\n".join("%s: %s" % header for header in headers)[:MAX_HEADER_CHARS]
-    mail["recipients"] = _addresses(
-        value for wanted in _RECIPIENT_HEADERS for name, value in headers if name.lower() == wanted
-    )
-    mail["mentions"] = _addresses(value for name, value in headers if name.lower().startswith("x-"))
+    mail = describe_headers(headers)
+    mail.update(plain="", rich="", markup="", attachments=0)
     try:
         part = msg.get_body(preferencelist=("plain",))
         if part is not None:

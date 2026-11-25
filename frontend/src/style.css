@@ -1276,3 +1276,13 @@ fieldset.field > legend {
     transition: none !important;
   }
 }
+
+.notice p {
+  margin: 4px 0;
+}
+
+.notice .snippet {
+  display: inline-flex;
+  width: auto;
+  vertical-align: middle;
+}

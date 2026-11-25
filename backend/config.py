@@ -24,5 +24,16 @@ class Config:
         self.forward_hourly_limit = int(env("FORWARD_HOURLY_LIMIT", "60"))
         self.addy_api_url = env("ADDY_API_URL", "https://app.addy.io/api/v1")
         self.duck_api_url = env("DUCK_API_URL", "https://quack.duckduckgo.com/api")
+        self.ms_token_url = env("MS_TOKEN_URL", "https://login.microsoftonline.com/common/oauth2/v2.0/token")
+        self.ms_imap_token_url = env(
+            "MS_IMAP_TOKEN_URL", "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+        )
+        self.ms_graph_url = env("MS_GRAPH_URL", "https://graph.microsoft.com/v1.0")
+        self.ms_device_url = env("MS_DEVICE_URL", "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode")
+        # Thunderbird's public application id, which Microsoft lets sign in with a device code.
+        self.ms_client_id = env("MS_CLIENT_ID", "9e5f94bc-e8a4-4e73-b8be-63364c29d753")
+        self.outlook_imap_host = env("OUTLOOK_IMAP_HOST", "outlook.live.com")
+        self.account_sync_minutes = float(env("ACCOUNT_SYNC_MINUTES", "5"))
+        self.account_sync_min_seconds = 10
         for key, value in overrides.items():
             setattr(self, key, value)

@@ -9,11 +9,13 @@ import MailboxesView from './views/MailboxesView.vue'
 import ScenariosView from './views/ScenariosView.vue'
 import SendView from './views/SendView.vue'
 import SourcesView from './views/SourcesView.vue'
+import AccountsView from './views/AccountsView.vue'
 import TemplatesView from './views/TemplatesView.vue'
 
 const pages = [
   { key: 'mailboxes', label: '全部邮箱', icon: 'inbox', view: MailboxesView },
   { key: 'sources', label: '邮箱来源', icon: 'link', view: SourcesView },
+  { key: 'accounts', label: '邮箱账号', icon: 'at', view: AccountsView },
   { key: 'send', label: '发送邮件', icon: 'send', view: SendView },
   { key: 'forwards', label: '邮件转发', icon: 'forward', view: ForwardsView },
   { key: 'scenarios', label: '业务场景', icon: 'layers', view: ScenariosView },

@@ -11,6 +11,7 @@
 - **无限邮箱**：已添加域名下的任意地址都能收信，不必预先创建
 - **生成邮箱**：接口一次调用返回一个可用地址，可以来自自有域名，也可以来自外部来源
 - **外部来源**：接入 addy.io 和 Duck（DuckDuckGo Email Protection），用它们的别名作为邮箱，在同一个后台里生成、停用、删除
+- **邮箱账号**：接入 Outlook / Hotmail 邮箱，由本系统登录读取，和其他邮箱在同一个列表里查看；也可以作为 addy、Duck 的收集地址
 - **停用和删除邮箱**：停用后不再接收该邮箱的邮件；addy 的别名会同步到 addy 那边
 - **查询验证码**：自动从邮件里提取验证码，支持长轮询等待
 - **业务场景**：按场景生成邮箱，每个场景可以关联一组域名、一组外部来源和一个邮件模板
@@ -84,6 +85,8 @@ MAIL_DOMAINS=a.com,b.com API_KEY=你的密钥 python3 server.py
 | `RETENTION_HOURS` | `24` | 邮件保留时长（小时） |
 | `RESEND_API_KEY` | 空 | Resend 的 API Key。留空则不启用发信 |
 | `FORWARD_HOURLY_LIMIT` | `60` | 每小时最多转发的邮件数，超出的只收不转；`0` 表示不限制 |
+| `MS_CLIENT_ID` | Thunderbird 的公开编号 | 授权添加 Outlook 账号时使用的微软应用编号。换成自己注册的应用时，要在应用里打开“允许公共客户端流” |
+| `ACCOUNT_SYNC_MINUTES` | `5` | 每隔多少分钟读取一次接入的邮箱账号；`0` 表示不定时读取 |
 | `PUBLIC_IP` | 自动探测 | 本服务器的公网 IP，用于 MX 检测。留空时启动后向外部服务查询一次 |
 | `MAX_MAIL_BYTES` | `2097152` | 单封邮件大小上限，超过则拒收 |
 
@@ -146,6 +149,17 @@ Docker 方式下，`.env` 里的 `SMTP_PORT` 和 `HTTP_PORT` 指的是宿主机�
 - 两个服务都有额度和频率限制（addy 免费版每小时新建 10 个别名、每月 10 MB 转发流量；Duck 的令牌用得太频繁会被暂时封禁）。超限时生成接口返回 `424` 和对方给出的原因，不会改用别的来源。
 - addy.io 的使用条款不允许用别名在其他网站批量注册账号。
 - 别名多一跳转发，邮件到达比自有域名慢，查验证码时 `wait` 要相应放宽。
+
+## 邮箱账号（Outlook）
+
+和上面两类不同，Outlook 邮箱的邮件不会送到本系统，而是由本系统登录到邮箱里去读。它只用于统一查看，不参与“生成邮箱”，也不需要关联业务场景。
+
+- **授权添加**：在“邮箱账号”页点“授权添加”，页面给出一个网址和一个代码；在浏览器里打开网址、输入代码、登录 Outlook 并同意，账号就会自动出现。授权用的应用编号由 `MS_CLIENT_ID` 决定，默认是 Thunderbird 邮件客户端的公开编号，所以授权页面上显示的应用名是 Thunderbird。对已接入的账号再授权一次会更新它的令牌。
+- **用已有令牌导入**：在同一页粘贴账号，每行一个，格式 `邮箱----密码----client_id----refresh_token`。密码不会被使用和保存；登录靠 `client_id` 和 `refresh_token`，两者必须来自同一次授权。
+- **读取**：读收件箱和垃圾箱各最近 20 封。优先用 Microsoft Graph，令牌没有 Graph 权限时改用 IMAP。读取时机有三个：每 `ACCOUNT_SYNC_MINUTES` 分钟一次；在后台打开这个邮箱时；查询它的验证码时（两次读取至少间隔 10 秒）。
+- **令牌**：每次读取微软可能换发新的 `refresh_token`，系统会自动保存。定时读取同时避免了令牌因长期不用而过期。改过邮箱密码后令牌失效，需要重新授权并在编辑里换成新的。
+- **邮件保留**：账号的邮件不受 `RETENTION_HOURS` 影响，不会被自动清理。
+- **作为收集地址**：addy 或 Duck 来源的收集地址可以填一个已接入的账号。这样 addy 的收件人、Duck 的转发邮箱都不用改：别名的邮件照旧转发到这个 Outlook，本系统读到后再记到别名名下。
 
 ## 邮件模板写法
 
@@ -359,7 +373,7 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 
 邮件对象：`id`、`address`、`from`、`subject`、`body`（纯文本正文）、`headers`（原始邮件头，最多 8000 字符）、`verify_code`、`received_at`、`read`（是否已读）。按接收时间倒序。查询验证码不会改变已读状态。
 
-统计：`domains`、`sources`、`mailboxes`、`mails`、`mails_24h`、`codes`。
+统计：`domains`、`sources`、`accounts`、`mailboxes`、`mails`、`mails_24h`、`codes`。
 
 ### 外部来源
 
@@ -378,7 +392,7 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 | `kind` | 是（仅添加时） | `addy` 或 `duck`，添加后不可改 |
 | `name` | 是 | 名称 |
 | `token` | 是 | 令牌 |
-| `collector` | 是 | 收集地址，必须是已添加域名下的邮箱，每个来源各用一个 |
+| `collector` | 是 | 收集地址：已添加域名下的邮箱，或一个已接入的邮箱账号。每个来源各用一个 |
 | `alias_domain` | 否 | 仅 addy：别名用的域名；留空用 addy 账户的默认域名 |
 | `alias_format` | 否 | 仅 addy：`random_characters`、`uuid`、`random_words`、`random_male_name`、`random_female_name`、`random_noun`；留空用 addy 账户的默认格式 |
 | `enabled` | 否 | 停用后不能再用它生成邮箱，已有邮箱照常收信 |
@@ -387,6 +401,21 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 列表项不含 `token`，另有 `token_mask`（首尾各 4 位）、`capabilities`（`create`、`toggle`、`delete` 中支持的几项）、`mailbox_count`、`scenario_count`、`created_at`。
 
 检测的 `status`：`ok` 可用；`pending` 令牌有效但收集地址还没在 addy 验证；`unknown` 无法校验（Duck）。令牌无效或连接失败时接口返回 `424`。对 addy 检测时，如果收集地址还不是它的收件人，会顺带把它加上。
+
+### 邮箱账号
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/accounts` | 列表 |
+| POST | `/api/accounts` | 添加。单个：`address`、`client_id`、`refresh_token`、`note`；批量：`text`，每行 `邮箱----密码----client_id----refresh_token`。返回 `{"added": [...], "skipped": [...]}`，已存在的账号被跳过 |
+| PUT | `/api/accounts/{id}` | 修改 `enabled`、`note`、`client_id`、`refresh_token`；后两项留空表示不改 |
+| DELETE | `/api/accounts/{id}` | 删除账号和已读取的邮件；被某个来源用作收集地址时拒绝 |
+| POST | `/api/accounts/authorize` | 授权添加。不带参数：发起一次授权，返回 `{"id", "user_code", "verification_uri", "expires_in", "interval"}`；带 `id`：查询结果，返回 `{"status": "pending"}`，或 `{"status": "done", "address", "added"}`（`added` 为 `false` 表示账号已存在、令牌已更新）。被拒绝或超时返回 `424` |
+| POST | `/api/accounts/{id}/sync` | 立即读取，返回 `{"fetched", "new", "channel"}`；失败返回 `424` |
+
+列表项不含 `refresh_token`，另有 `token_mask`、`status`（空表示还没读取过，`ok`，`error`）、`error`、`channel`（`graph` 或 `imap`）、`synced_at`、`mail_count`、`source_count`。
+
+账号在邮箱列表里的 `source_kind` 是 `outlook`，`account` 是账号 ID；`GET /api/mailboxes?source=account` 只列出账号。账号的邮箱不能通过 `/api/mailboxes` 删除。
 
 ### 业务场景
 
@@ -482,6 +511,7 @@ backend/server.py        入口：启动 SMTP 和 HTTP，收信后的入库与�
 backend/api.py           HTTP 接口
 backend/store.py         SQLite 存储
 backend/sources.py       外部来源（addy.io、Duck）的接口封装
+backend/accounts.py      邮箱账号（Outlook）的登录和读取
 backend/smtp.py          SMTP 收信
 backend/extract.py       邮件解析和验证码提取
 backend/mxcheck.py       MX 检测
@@ -504,6 +534,7 @@ start.sh / stop.sh       启停脚本
 ## 限制
 
 - 别名还原靠邮件头：本系统在 `To`、`Cc`、`Delivered-To` 等收件人头和 `X-` 头里找别名地址。如果某个来源转发时不保留原始别名，邮件会记在收集地址名下；可以在后台展开邮件点“查看邮件头”确认。
+- Outlook 账号的 `refresh_token` 和来源的令牌一样明文保存在数据库里；每个账号每次只读收件箱和垃圾箱最近 20 封，不读更早的邮件，也不支持从账号发信。
 - Duck 的接口不是公开接口，可能随时失效；它也不支持远端停用、删除和列出地址。
 
 - 发信和转发依赖 Resend，受其额度和使用政策约束；不支持附件。

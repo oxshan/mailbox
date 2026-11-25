@@ -4,7 +4,8 @@ export interface Mailbox {
   address: string
   domain: string
   source: number | null
-  source_kind: SourceKind | 'domain'
+  account: number | null
+  source_kind: SourceKind | 'domain' | 'outlook'
   source_name: string | null
   active: boolean
   scenario: string | null
@@ -29,6 +30,7 @@ export interface Mail {
 export interface Stats {
   domains: number
   sources: number
+  accounts: number
   mailboxes: number
   mails: number
   mails_24h: number
@@ -138,6 +140,37 @@ export interface SourceCheck {
   message: string
 }
 
+export interface Account {
+  id: number
+  kind: 'outlook'
+  address: string
+  client_id: string
+  token_mask: string
+  enabled: boolean
+  note: string
+  status: '' | 'ok' | 'error'
+  error: string
+  channel: '' | 'graph' | 'imap'
+  synced_at: number | null
+  mail_count: number
+  source_count: number
+  created_at: number
+}
+
+export interface AccountAuthorization {
+  id: string
+  user_code: string
+  verification_uri: string
+  expires_in: number
+  interval: number
+}
+
+export interface AccountSync {
+  fetched: number
+  new: number
+  channel: string
+}
+
 export class UnauthorizedError extends Error {}
 
 const KEY_STORAGE = 'mailbox_api_key'
@@ -201,6 +234,21 @@ export const api = {
   updateForward: (id: number, changes: { enabled?: boolean; note?: string }) =>
     request<{ id: number }>(`forwards/${id}`, { method: 'PUT', body: changes }),
   deleteForward: (id: number) => request<{ id: number }>(`forwards/${id}`, { method: 'DELETE' }),
+
+  accounts: () => request<{ accounts: Account[] }>('accounts').then((r) => r.accounts),
+  importAccounts: (text: string) =>
+    request<{ added: string[]; skipped: string[] }>('accounts', { method: 'POST', body: { text } }),
+  updateAccount: (id: number, changes: { enabled?: boolean; note?: string; client_id?: string; refresh_token?: string }) =>
+    request<{ id: number }>(`accounts/${id}`, { method: 'PUT', body: changes }),
+  deleteAccount: (id: number) => request<{ id: number }>(`accounts/${id}`, { method: 'DELETE' }),
+  startAuthorization: () =>
+    request<AccountAuthorization>('accounts/authorize', { method: 'POST', body: {} }),
+  checkAuthorization: (id: string) =>
+    request<{ status: 'pending' | 'done'; address?: string; added?: boolean }>('accounts/authorize', {
+      method: 'POST',
+      body: { id },
+    }),
+  syncAccount: (id: number) => request<AccountSync>(`accounts/${id}/sync`, { method: 'POST' }),
 
   scenarios: () => request<{ scenarios: Scenario[] }>('scenarios').then((r) => r.scenarios),
   saveScenario: (input: ScenarioInput, id?: number) =>

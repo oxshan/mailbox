@@ -10,10 +10,12 @@ import time
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, unquote, urlparse
 
+import accounts
 import mxcheck
 import sources
 from extract import _EMAIL, compile_template, extract_with_template, html_to_text
 from outbound import SendError, send_via_resend
+from accounts import AccountError
 from sources import SourceError
 from store import DEFAULT_SCENARIO
 
@@ -23,14 +25,15 @@ MAX_FORWARDS = 20
 UPSTREAM_FAILED = 424
 _DOMAIN = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]")
 # Resources with a third path segment: /api/mailboxes/<address>/code, /api/sources/<id>/check, ...
-_NESTED = ("mailboxes", "mails", "sources")
+_NESTED = ("mailboxes", "mails", "sources", "accounts")
 _MAILBOXES = (
-    "SELECT b.address, b.domain, b.created_at, b.active, b.source_id AS source,"
-    " COALESCE(src.kind, 'domain') AS source_kind, src.name AS source_name,"
+    "SELECT b.address, b.domain, b.created_at, b.active, b.source_id AS source, b.account_id AS account,"
+    " COALESCE(src.kind, acc.kind, 'domain') AS source_kind, src.name AS source_name,"
     " s.key AS scenario, s.name AS scenario_name,"
     " COUNT(m.id) AS mail_count, MAX(m.received_at) AS last_mail_at"
     " FROM mailboxes b LEFT JOIN scenarios s ON s.id = b.scenario_id"
     " LEFT JOIN sources src ON src.id = b.source_id"
+    " LEFT JOIN accounts acc ON acc.id = b.account_id"
     " LEFT JOIN mails m ON m.address = b.address AND m.deleted_at IS NULL"
     " WHERE b.deleted_at IS NULL"
 )
@@ -99,7 +102,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": "not found"})
         except ValueError as exc:
             self.send_json(400, {"error": str(exc)})
-        except SourceError as exc:
+        except (SourceError, AccountError) as exc:
             self.send_json(UPSTREAM_FAILED, {"error": str(exc)})
 
     do_GET = do_POST = do_PUT = do_DELETE = route
@@ -199,8 +202,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         collector = fields["collector"]
         if len(collector) > 254 or not _EMAIL.fullmatch(collector):
             raise ValueError("收集地址格式不正确：%s" % collector)
-        if collector.rpartition("@")[2] not in store.domain_names():
-            raise ValueError("收集地址必须是已添加域名下的邮箱：%s" % collector)
+        own_domain = collector.rpartition("@")[2] in store.domain_names()
+        if not own_domain and not store.query("SELECT 1 FROM accounts WHERE address = ?", (collector,)):
+            raise ValueError("收集地址必须是已添加域名下的邮箱，或一个已接入的邮箱账号：%s" % collector)
         box = store.mailbox(collector)
         if box and box["source_id"] is not None:
             raise ValueError("收集地址不能是外部来源的邮箱：%s" % collector)
@@ -266,6 +270,140 @@ class ApiHandler(BaseHTTPRequestHandler):
         store.execute("DELETE FROM sources WHERE id = ?", (source["id"],))
         store.execute("DELETE FROM scenario_sources WHERE source_id = ?", (source["id"],))
         self.send_json(200, {"id": source["id"]})
+
+    def account_view(self, row):
+        view = {key: value for key, value in row.items() if key != "refresh_token"}
+        view["token_mask"] = mask(row["refresh_token"])
+        view["enabled"] = bool(row["enabled"])
+        return view
+
+    def get_accounts(self, params, item=None, action=None):
+        if item is not None:
+            raise LookupError(item)
+        rows = self.app.store.query(
+            "SELECT a.*, (SELECT COUNT(*) FROM mails m WHERE m.address = a.address AND m.deleted_at IS NULL)"
+            " AS mail_count,"
+            " (SELECT COUNT(*) FROM sources s WHERE s.collector = a.address) AS source_count"
+            " FROM accounts a ORDER BY a.id"
+        )
+        self.send_json(200, {"accounts": [self.account_view(row) for row in rows]})
+
+    def account_lines(self, params):
+        """Accounts to add: one from the fields, or one per line of `text` as 邮箱----密码----client_id----令牌."""
+        if "text" not in params:
+            fields = [str(params.get(key, "")).strip() for key in ("address", "client_id", "refresh_token")]
+            return [fields + [str(params.get("note", "")).strip()]]
+        lines = []
+        for number, line in enumerate(str(params["text"]).splitlines(), 1):
+            if not line.strip():
+                continue
+            parts = [part.strip() for part in line.strip().split("----")]
+            if len(parts) < 4:
+                raise ValueError("第 %d 行格式不对，应为：邮箱----密码----client_id----refresh_token" % number)
+            # The password is not used; a refresh token may itself contain the separator.
+            lines.append([parts[0], parts[2], "----".join(parts[3:]), ""])
+        if not lines:
+            raise ValueError("没有可导入的账号")
+        return lines
+
+    def post_accounts(self, params, item=None, action=None):
+        store = self.app.store
+        if item == "authorize" and action is None:
+            return self.authorize(params)
+        if item is not None:
+            account = store.account(int(item)) if item.isdigit() else None
+            if not account or action != "sync":
+                raise LookupError(item)
+            return self.send_json(200, self.app.sync_account(account))
+        kind = str(params.get("kind", "outlook")).strip().lower()
+        if kind not in accounts.KINDS:
+            raise ValueError("账号类型只能是：%s" % "、".join(accounts.KINDS))
+        lines = self.account_lines(params)
+        for address, client_id, refresh_token, _ in lines:
+            if len(address) > 254 or not _EMAIL.fullmatch(address):
+                raise ValueError("邮箱地址格式不正确：%s" % address)
+            if address.lower().rpartition("@")[2] in store.domain_names():
+                raise ValueError("自有域名下的邮箱不需要接入：%s" % address)
+            if not client_id or not refresh_token:
+                raise ValueError("%s 缺少 client_id 或 refresh_token" % address)
+        added, skipped = [], []
+        for address, client_id, refresh_token, note in lines:
+            new_id = store.add_account(kind, address.lower(), client_id, refresh_token, note)
+            (added if new_id else skipped).append(address.lower())
+        if not added and len(lines) == 1:
+            raise ValueError("账号已存在：%s" % skipped[0])
+        self.send_json(200, {"added": added, "skipped": skipped})
+
+    def authorize(self, params):
+        """Add an Outlook account by signing in: without `id` start a sign-in, with it check on one."""
+        app, store = self.app, self.app.store
+        now = time.time()
+        for key in [key for key, pending in app.authorizations.items() if pending["expires_at"] < now]:
+            del app.authorizations[key]
+        if "id" not in params:
+            reply = accounts.start_authorization(app.cfg)
+            key = secrets.token_urlsafe(12)
+            expires_in = int(reply.get("expires_in", 900))
+            app.authorizations[key] = {"device_code": reply["device_code"], "expires_at": now + expires_in}
+            return self.send_json(
+                200,
+                {
+                    "id": key,
+                    "user_code": reply.get("user_code", ""),
+                    "verification_uri": reply.get("verification_uri", ""),
+                    "expires_in": expires_in,
+                    "interval": int(reply.get("interval", 5)),
+                },
+            )
+        key = str(params["id"])
+        pending = app.authorizations.get(key)
+        if not pending:
+            raise ValueError("这次授权已过期，请重新开始")
+        try:
+            result = accounts.finish_authorization(app.cfg, pending["device_code"])
+        except AccountError:
+            app.authorizations.pop(key, None)
+            raise
+        if result is None:
+            return self.send_json(200, {"status": "pending"})
+        app.authorizations.pop(key, None)
+        address, refresh_token = result
+        if address.rpartition("@")[2] in store.domain_names():
+            raise ValueError("自有域名下的邮箱不需要接入：%s" % address)
+        client_id = app.cfg.ms_client_id
+        added = bool(store.add_account("outlook", address, client_id, refresh_token))
+        if not added:
+            store.execute(
+                "UPDATE accounts SET client_id = ?, refresh_token = ?, status = '', error = '' WHERE address = ?",
+                (client_id, refresh_token, address),
+            )
+        self.send_json(200, {"status": "done", "address": address, "added": added})
+
+    def put_accounts(self, params, item=None, action=None):
+        store = self.app.store
+        account = store.account(int(item)) if item and item.isdigit() and action is None else None
+        if not account:
+            raise LookupError(item)
+        client_id = str(params.get("client_id", "")).strip() or account["client_id"]
+        refresh_token = str(params.get("refresh_token", "")).strip() or account["refresh_token"]
+        enabled = int(as_bool(params.get("enabled", account["enabled"])))
+        note = str(params.get("note", account["note"])).strip()
+        store.execute(
+            "UPDATE accounts SET client_id = ?, refresh_token = ?, enabled = ?, note = ? WHERE id = ?",
+            (client_id, refresh_token, enabled, note, account["id"]),
+        )
+        self.send_json(200, {"id": account["id"]})
+
+    def delete_accounts(self, params, item=None, action=None):
+        store = self.app.store
+        account = store.account(int(item)) if item and item.isdigit() and action is None else None
+        if not account:
+            raise LookupError(item)
+        users = store.query("SELECT name FROM sources WHERE collector = ?", (account["address"],))
+        if users:
+            raise ValueError("来源「%s」用它作收集地址，请先修改或删除该来源" % users[0]["name"])
+        store.remove_account(account)
+        self.send_json(200, {"id": account["id"]})
 
     def get_forwards(self, params, item=None):
         rows = self.app.store.query("SELECT * FROM forwards ORDER BY id")
@@ -496,7 +634,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         if scenario:
             where, args = where + " AND s.key = ?", args + [scenario]
         if source == "domain":
-            where += " AND b.source_id IS NULL"
+            where += " AND b.source_id IS NULL AND b.account_id IS NULL"
+        elif source == "account":
+            where += " AND b.account_id IS NOT NULL"
         elif source:
             where, args = where + " AND b.source_id = ?", args + [int(source)]
         if active:
@@ -597,6 +737,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def delete_mailboxes(self, params, item=None, action=None):
         box, client = self.owned_mailbox(item, action)
+        if box["account_id"] is not None:
+            raise ValueError("这是接入的邮箱账号，请到“邮箱账号”页面删除")
         synced = False
         if client and "delete" in client.capabilities:
             remote_id = self.remote_id(box, client)
@@ -612,6 +754,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         since = float(params.get("since", 0))
         deadline = time.time() + min(max(float(params.get("wait", 0)), 0), 60)
         while True:
+            self.pull(address, self.app.cfg.account_sync_min_seconds)
             row = self.app.store.latest_code(address, since)
             if row or time.time() >= deadline:
                 break
@@ -628,8 +771,22 @@ class ApiHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def pull(self, address, max_age):
+        """Read the inbox behind an address when its mail lives in an account we log in to.
+
+        A failure is kept on the account for the dashboard; the caller still gets what is stored.
+        """
+        account = self.app.store.account_for(address)
+        if account and account["enabled"]:
+            try:
+                self.app.sync_account(account, max_age)
+            except AccountError:
+                pass
+
     def send_mails(self, params, address=""):
         limit = min(max(int(params.get("limit", 50)), 1), 200)
+        if address:
+            self.pull(address, 60)
         sql = (
             "SELECT id, address, sender AS 'from', subject, body, headers, code AS verify_code, received_at,"
             " read_at IS NOT NULL AS read"
@@ -711,7 +868,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             " (SELECT COUNT(*) FROM mails WHERE deleted_at IS NULL) AS mails,"
             " (SELECT COUNT(*) FROM mails WHERE received_at >= ? AND deleted_at IS NULL) AS mails_24h,"
             " (SELECT COUNT(*) FROM mails WHERE code IS NOT NULL AND deleted_at IS NULL) AS codes,"
-            " (SELECT COUNT(*) FROM sources) AS sources",
+            " (SELECT COUNT(*) FROM sources) AS sources, (SELECT COUNT(*) FROM accounts) AS accounts",
             (day_ago,),
         )[0]
         row["domains"] = len(store.domain_names())

@@ -86,6 +86,7 @@ async function remove(box: Mailbox) {
   const note = {
     domain: '之后再有邮件发到这个地址，它会重新出现；想拒收请改用停用。',
     addy: '同时会在 addy.io 删除这个别名。',
+    outlook: '',
     duck: 'Duck 不支持删除，这个地址在 Duck 仍然有效，再来信会重新出现；想拒收请改用停用。',
   }[box.source_kind]
   if (!window.confirm(`确定删除邮箱 ${box.address} 吗？${note}`)) return
@@ -206,6 +207,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
               <span>
                 <span class="tag">{{ box.scenario_name ?? '默认场景' }}</span>
                 <span v-if="box.source_name" class="tag primary">{{ box.source_name }}</span>
+                <span v-if="box.account !== null" class="tag primary">Outlook</span>
                 <span v-if="!box.active" class="tag error">已停用</span>
               </span>
               <time>{{ formatTime(box.last_mail_at ?? box.created_at) }}</time>
@@ -234,7 +236,14 @@ onBeforeUnmount(() => window.clearInterval(timer))
           >
             <Icon name="power" />
           </button>
-          <button class="icon-btn danger" type="button" title="删除邮箱" aria-label="删除邮箱" @click="remove(current)">
+          <button
+            v-if="current.account === null"
+            class="icon-btn danger"
+            type="button"
+            title="删除邮箱"
+            aria-label="删除邮箱"
+            @click="remove(current)"
+          >
             <Icon name="trash" />
           </button>
         </template>

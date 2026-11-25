@@ -20,6 +20,13 @@ CREATE TABLE IF NOT EXISTS sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, name TEXT NOT NULL, token TEXT NOT NULL,
     collector TEXT NOT NULL UNIQUE, alias_domain TEXT NOT NULL DEFAULT '', alias_format TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1, note TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, address TEXT NOT NULL UNIQUE,
+    client_id TEXT NOT NULL, refresh_token TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+    note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+    channel TEXT NOT NULL DEFAULT '', synced_at REAL, created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS account_seen (
+    account_id INTEGER NOT NULL, remote_id TEXT NOT NULL, PRIMARY KEY (account_id, remote_id));
 CREATE TABLE IF NOT EXISTS templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, mode TEXT NOT NULL,
     pattern TEXT NOT NULL, sample TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL);
@@ -33,7 +40,7 @@ CREATE TABLE IF NOT EXISTS scenario_sources (
 CREATE TABLE IF NOT EXISTS mailboxes (
     address TEXT PRIMARY KEY, domain TEXT NOT NULL, scenario_id INTEGER NOT NULL, source_id INTEGER,
     remote_id TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL,
-    deleted_at REAL);
+    deleted_at REAL, account_id INTEGER);
 CREATE TABLE IF NOT EXISTS mails (
     id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT NOT NULL, sender TEXT, subject TEXT, body TEXT,
     alt TEXT NOT NULL DEFAULT '', headers TEXT NOT NULL DEFAULT '', code TEXT, received_at REAL NOT NULL,
@@ -80,6 +87,7 @@ class Store:
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("PRAGMA journal_mode=WAL;" + _SCHEMA + "PRAGMA user_version = %d;" % SCHEMA_VERSION)
+        self.add_column("mailboxes", "account_id", "INTEGER")
         self.execute(
             "INSERT OR IGNORE INTO scenarios (key, name, created_at) VALUES (?, '默认场景', ?)",
             (DEFAULT_SCENARIO, time.time()),
@@ -132,6 +140,46 @@ class Store:
     def collectors(self):
         """Collector address -> source, for every source."""
         return {row["collector"]: row for row in self.query("SELECT * FROM sources")}
+
+    def account(self, account_id):
+        rows = self.query("SELECT * FROM accounts WHERE id = ?", (account_id,))
+        return rows[0] if rows else None
+
+    def account_for(self, address):
+        """The account whose inbox holds an address's mail: the address itself, or the collector of its source."""
+        rows = self.query(
+            "SELECT a.* FROM accounts a WHERE a.address = ? OR a.address = (SELECT s.collector FROM mailboxes b"
+            " JOIN sources s ON s.id = b.source_id WHERE b.address = ? AND b.deleted_at IS NULL)",
+            (address, address),
+        )
+        return rows[0] if rows else None
+
+    def add_account(self, kind, address, client_id, refresh_token, note=""):
+        """Record an account and the mailbox that shows its mail. Returns its id, or None when it exists."""
+        now = time.time()
+        with self.lock, self.db:
+            if self.db.execute("SELECT 1 FROM accounts WHERE address = ?", (address,)).fetchone():
+                return None
+            account_id = self.db.execute(
+                "INSERT INTO accounts (kind, address, client_id, refresh_token, note, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (kind, address, client_id, refresh_token, note, now),
+            ).lastrowid
+            self.db.execute("DELETE FROM mailboxes WHERE address = ?", (address,))
+            self.db.execute(
+                "INSERT INTO mailboxes (address, domain, scenario_id, account_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                (address, address.rsplit("@", 1)[1], self.default_scenario_id, account_id, now),
+            )
+        return account_id
+
+    def remove_account(self, account):
+        self.remove_mailbox(account["address"])
+        self.execute("DELETE FROM account_seen WHERE account_id = ?", (account["id"],))
+        self.execute("DELETE FROM accounts WHERE id = ?", (account["id"],))
+
+    def mark_seen(self, account_id, remote_id):
+        """Remember a message of an account. Returns False when it was already taken in."""
+        return bool(self.execute("INSERT OR IGNORE INTO account_seen VALUES (?, ?)", (account_id, remote_id)))
 
     def mailbox(self, address):
         rows = self.query("SELECT * FROM mailboxes WHERE address = ? AND deleted_at IS NULL", (address,))
@@ -199,9 +247,9 @@ class Store:
         )
         return rows[0] if rows else None
 
-    def add_mail(self, address, mail, code, source_id=None):
+    def add_mail(self, address, mail, code, source_id=None, received_at=None):
         """Store a received mail, creating its mailbox in the default scenario when it is new."""
-        now = time.time()
+        now = received_at or time.time()
         with self.lock, self.db:
             self.db.execute(
                 "INSERT OR IGNORE INTO mailboxes (address, domain, scenario_id, source_id, created_at)"
@@ -262,14 +310,19 @@ class Store:
 
         Only catch-all mailboxes on our own domains expire. A mailbox of an external source stays, because
         its alias keeps working there, and so does a disabled one, which would otherwise accept mail again.
+        An account's mailbox and its mails stay too: they mirror an inbox that keeps them.
         """
         now = time.time()
         cutoff = now - max_age_seconds
-        self.execute("UPDATE mails SET deleted_at = ? WHERE received_at < ? AND deleted_at IS NULL", (now, cutoff))
+        self.execute(
+            "UPDATE mails SET deleted_at = ? WHERE received_at < ? AND deleted_at IS NULL"
+            " AND address NOT IN (SELECT address FROM mailboxes WHERE account_id IS NOT NULL)",
+            (now, cutoff),
+        )
         self.execute("UPDATE sent_mails SET deleted_at = ? WHERE created_at < ? AND deleted_at IS NULL", (now, cutoff))
         self.execute(
             "UPDATE mailboxes SET deleted_at = ? WHERE created_at < ? AND deleted_at IS NULL"
-            " AND source_id IS NULL AND active = 1"
+            " AND source_id IS NULL AND account_id IS NULL AND active = 1"
             " AND address NOT IN (SELECT DISTINCT address FROM mails WHERE deleted_at IS NULL)",
             (now, cutoff),
         )

@@ -10,6 +10,7 @@ import time
 from email.utils import parseaddr
 from http.server import ThreadingHTTPServer
 
+import accounts
 from api import ApiHandler
 from config import Config
 from extract import _EMAIL, extract_for, parse_mail
@@ -33,6 +34,8 @@ class MailApp:
         self.smtp_port = self.http_port = None
         self.smtp_error = None
         self.stopped = threading.Event()
+        self.account_locks = {}
+        self.authorizations = {}
 
     @property
     def key_file(self):
@@ -48,22 +51,26 @@ class MailApp:
             handle.write(key)
         return key
 
-    def deliver(self, sender, recipients, raw):
-        """Store a received mail under every recipient, or under the alias it was forwarded from."""
+    def ingest(self, recipient, mail, received_at=None):
+        """Store a mail under the address it reached us at, or under the alias it was forwarded from.
+
+        Returns False when the mailbox is disabled and the mail was dropped.
+        """
         store = self.store
+        source = store.collectors().get(recipient)
+        alias = store.resolve_alias(source, mail["recipients"], mail["mentions"]) if source else None
+        address = alias or recipient
+        if store.is_disabled(address):
+            return False
+        code = extract_for(store.template_for(address), mail["subject"], mail["plain"], mail["rich"])
+        store.add_mail(address, mail, code, source["id"] if alias else None, received_at)
+        return True
+
+    def deliver(self, sender, recipients, raw):
+        """Take in a mail received over SMTP, then forward a copy of it."""
         mail = parse_mail(raw)
         mail["sender"] = mail["sender"] or sender
-        collectors = store.collectors()
-        accepted = []
-        for recipient in recipients:
-            source = collectors.get(recipient)
-            alias = store.resolve_alias(source, mail["recipients"], mail["mentions"]) if source else None
-            address = alias or recipient
-            if store.is_disabled(address):
-                continue
-            code = extract_for(store.template_for(address), mail["subject"], mail["plain"], mail["rich"])
-            store.add_mail(address, mail, code, source["id"] if alias else None)
-            accepted.append(recipient)
+        accepted = [recipient for recipient in recipients if self.ingest(recipient, mail)]
         try:
             self.forward(
                 mail["sender"], accepted, mail["subject"], mail["plain"] or mail["rich"], mail["markup"],
@@ -71,6 +78,45 @@ class MailApp:
             )
         except Exception as exc:
             print("forward failed: %r" % exc, flush=True)
+
+    def sync_account(self, account, max_age=0.0):
+        """Read an account's inbox and take in the mails we have not seen. Returns a summary.
+
+        A sync that finished less than max_age seconds ago is not repeated.
+        """
+        store = self.store
+        with self.account_locks.setdefault(account["id"], threading.Lock()):
+            account = store.account(account["id"])
+            if not account or (max_age and account["synced_at"] and time.time() - account["synced_at"] < max_age):
+                return {"fetched": 0, "new": 0, "channel": account["channel"] if account else ""}
+            try:
+                messages, refresh_token, channel = accounts.fetch(self.cfg, account)
+            except accounts.AccountError as exc:
+                store.execute(
+                    "UPDATE accounts SET status = 'error', error = ?, synced_at = ? WHERE id = ?",
+                    (str(exc), time.time(), account["id"]),
+                )
+                raise
+            store.execute(
+                "UPDATE accounts SET status = 'ok', error = '', channel = ?, refresh_token = ?, synced_at = ?"
+                " WHERE id = ?",
+                (channel, refresh_token, time.time(), account["id"]),
+            )
+            new = 0
+            for message in sorted(messages, key=lambda item: item["received_at"]):
+                if message["remote_id"] and store.mark_seen(account["id"], message["remote_id"]):
+                    new += self.ingest(account["address"], message["mail"], message["received_at"])
+            return {"fetched": len(messages), "new": new, "channel": channel}
+
+    def run_sync(self):
+        """Keep enabled accounts read, which also keeps their refresh tokens from expiring unused."""
+        interval = self.cfg.account_sync_minutes * 60
+        while interval > 0 and not self.stopped.wait(interval):
+            for account in self.store.query("SELECT * FROM accounts WHERE enabled = 1"):
+                try:
+                    self.sync_account(account)
+                except accounts.AccountError:
+                    pass
 
     def forward(self, origin, recipients, subject, text, markup, attachments):
         """Send a copy of a received mail to every enabled forward address through Resend."""
@@ -161,7 +207,7 @@ class MailApp:
         self.http.daemon_threads = True
         self.http_port = self.http.server_address[1]
         ready = threading.Event()
-        for target, args in ((self.run_smtp, (ready,)), (self.http.serve_forever, ()), (self.run_purge, ())):
+        for target, args in ((self.run_smtp, (ready,)), (self.http.serve_forever, ()), (self.run_purge, ()), (self.run_sync, ())):
             threading.Thread(target=target, args=args, daemon=True).start()
         ready.wait()
         if self.smtp_error:

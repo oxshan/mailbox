@@ -14,7 +14,7 @@ Mailbox manager: Python 3 backend (standard library only, keep it Python 3.8 com
 
 - Storage is SQLite (`backend/data/mail.db`). Schema changes must upgrade existing databases in `Store.__init__` (`add_column`). Databases from before `SCHEMA_VERSION` 2 are renamed aside at startup, not converted.
 - Backend modules import each other by plain name (`import store`), so run and test from `backend/`.
-- Tests never call addy.io or Duck: `fake_sources` in `test_server.py` stands in for both.
+- Tests never call addy.io or Duck: `fake_sources` in `test_server.py` stands in for both. Likewise `fake_microsoft` for Outlook accounts (`accounts.py`), whose mail is read by logging in, not received over SMTP.
 - `MAIL_DOMAINS` only seeds the domain table on first start; afterwards domains are managed in the dashboard.
 
 - Dependencies are pinned to exact versions; add new ones with `yarn add --exact`.
