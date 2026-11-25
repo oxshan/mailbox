@@ -1,44 +1,55 @@
 :root {
-  --bg: #f4f6fa;
+  --bg: #f4f4f6;
   --surface: #ffffff;
-  --surface-2: #f8fafc;
-  --border: #e3e8ef;
-  --text: #0f172a;
-  --text-2: #475569;
-  --muted: #64748b;
-  --primary: #2563eb;
-  --primary-hover: #1d4ed8;
-  --primary-soft: #eef4ff;
+  --surface-2: #f9f9fb;
+  --pill: #f1f1f4;
+  --pill-hover: #e9e9ee;
+  --border: #e3e3e8;
+  --border-2: #ececf0;
+  --text: #1c1c21;
+  --text-2: #4b4b53;
+  --muted: #85858d;
+  --primary: #4f46e5;
+  --primary-hover: #4338ca;
+  --primary-soft: #eeedfd;
   --on-primary: #ffffff;
-  --success: #15803d;
+  --selected: #ecebfb;
+  --success: #189a58;
   --warning: #b45309;
-  --danger: #b91c1c;
-  --danger-soft: #fef2f2;
-  --shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --danger: #d64545;
+  --danger-soft: #fbe9e9;
+  --shadow: 0 0 0 0.5px var(--border), 0 1px 2px rgba(20, 22, 30, 0.04);
+  --shadow-float: 0 16px 44px rgba(20, 22, 30, 0.16), 0 2px 8px rgba(20, 22, 30, 0.06), 0 0 0 0.5px rgba(20, 22, 30, 0.1);
   --radius: 10px;
-  --control: 32px;
-  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --control: 28px;
+  --font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --mono: ui-monospace, 'SF Mono', Menlo, 'Cascadia Mono', Consolas, monospace;
   color-scheme: light dark;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0b1120;
-    --surface: #131c2e;
-    --surface-2: #0f1727;
-    --border: #243049;
-    --text: #e8eef7;
-    --text-2: #b4c0d3;
-    --muted: #8a99b0;
-    --primary: #6aa5ff;
-    --primary-hover: #8dbaff;
-    --primary-soft: #18294a;
-    --on-primary: #0b1120;
+    --bg: #1a1a1e;
+    --surface: #232327;
+    --surface-2: #1f1f23;
+    --pill: #2d2d33;
+    --pill-hover: #36363d;
+    --border: #333339;
+    --border-2: #2c2c32;
+    --text: #ededf1;
+    --text-2: #b9b9c1;
+    --muted: #9c9ca6;
+    --primary: #a5b4fc;
+    --primary-hover: #c7d2fe;
+    --primary-soft: #2b2c47;
+    --on-primary: #14142a;
+    --selected: #33345a;
     --success: #4ade80;
     --warning: #fbbf24;
-    --danger: #fca5a5;
-    --danger-soft: #3a1114;
-    --shadow: none;
+    --danger: #f87171;
+    --danger-soft: #3d1c1c;
+    --shadow: 0 0 0 0.5px var(--border);
+    --shadow-float: 0 16px 44px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.12);
   }
 }
 
@@ -56,7 +67,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font: 13px/1.4 var(--font);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -78,6 +89,8 @@ input,
 select {
   font: inherit;
   color: inherit;
+  padding: 0 8px;
+  border-radius: 6px;
 }
 
 button {
@@ -100,7 +113,7 @@ button:disabled {
 
 .mono {
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .muted {
@@ -139,19 +152,24 @@ select:hover {
   justify-content: center;
   gap: 6px;
   height: var(--control);
-  padding: 0 12px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface);
-  font-weight: 600;
+  padding: 0 11px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--pill);
+  font-weight: 500;
   white-space: nowrap;
   transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--pill-hover);
 }
 
 .btn.primary {
   border-color: var(--primary);
   background: var(--primary);
   color: var(--on-primary);
+  font-weight: 500;
 }
 
 .btn.primary:hover:not(:disabled) {
@@ -166,14 +184,14 @@ select:hover {
   height: var(--control);
   place-items: center;
   border: 0;
-  border-radius: 7px;
+  border-radius: 6px;
   background: none;
   color: var(--muted);
   transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 .icon-btn:hover {
-  background: var(--border);
+  background: var(--pill-hover);
   color: var(--text);
 }
 
@@ -195,17 +213,17 @@ select:hover {
 }
 
 .brand strong {
-  font-size: 16px;
-  font-weight: 700;
+  font-size: 14px;
+  font-weight: 600;
   letter-spacing: -0.01em;
 }
 
 .logo {
   display: grid;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   place-items: center;
-  border-radius: 8px;
+  border-radius: 7px;
   background: var(--primary);
   color: var(--on-primary);
 }
@@ -223,12 +241,12 @@ select:hover {
   display: grid;
   gap: 10px;
   width: 100%;
-  max-width: 340px;
-  padding: 24px;
-  border: 1px solid var(--border);
-  border-radius: 14px;
+  max-width: 300px;
+  padding: 20px;
+  border: 0;
+  border-radius: 12px;
   background: var(--surface);
-  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+  box-shadow: var(--shadow-float);
 }
 
 .login-card label {
@@ -240,7 +258,7 @@ select:hover {
 
 .login-card input,
 .login-card .btn {
-  height: 40px;
+  height: 32px;
 }
 
 .login-card .btn {
@@ -251,21 +269,21 @@ select:hover {
 
 .shell {
   display: grid;
-  grid-template-columns: 184px minmax(0, 1fr);
+  grid-template-columns: 176px minmax(0, 1fr);
   height: 100vh;
 }
 
 .nav {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 14px 10px;
+  gap: 12px;
+  padding: 12px 8px 8px;
   border-right: 1px solid var(--border);
-  background: var(--surface);
+  background: var(--bg);
 }
 
 .nav .brand {
-  padding: 0 6px;
+  padding: 2px 8px 0;
 }
 
 .nav-list {
@@ -276,28 +294,28 @@ select:hover {
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
-  height: calc(var(--control) + 4px);
-  padding: 0 10px;
+  height: 30px;
+  padding: 0 8px;
   border: 0;
   border-radius: 7px;
   background: none;
   color: var(--text-2);
-  font-weight: 500;
+  font-weight: 400;
   text-decoration: none;
   transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 .nav-item:hover {
-  background: var(--surface-2);
+  background: var(--pill-hover);
   color: var(--text);
 }
 
 .nav-item.active {
-  background: var(--primary-soft);
+  background: var(--selected);
   color: var(--primary);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .nav-foot {
@@ -307,22 +325,22 @@ select:hover {
 .main {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   min-width: 0;
   min-height: 0;
-  padding: 12px 16px 16px;
+  padding: 12px;
 }
 
 .page-head {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   min-height: var(--control);
 }
 
 .page-head h1 {
-  font-size: 16px;
-  font-weight: 700;
+  font-size: 15px;
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -340,9 +358,9 @@ select:hover {
 
 .chip {
   padding: 2px 8px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 999px;
-  background: var(--surface);
+  background: var(--pill);
   color: var(--text-2);
   font-family: var(--mono);
   font-size: 12px;
@@ -359,8 +377,8 @@ select:hover {
 }
 
 .dot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--success);
   animation: pulse 2s ease-in-out infinite;
@@ -387,15 +405,15 @@ select:hover {
 .stats {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
+  gap: 8px;
 }
 
 .stat {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
+  gap: 8px;
+  padding: 8px 12px;
+  border: 0;
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow);
@@ -403,17 +421,17 @@ select:hover {
 
 .stat-icon {
   display: grid;
-  width: 30px;
-  height: 30px;
+  width: 24px;
+  height: 24px;
   place-items: center;
-  border-radius: 8px;
+  border-radius: 7px;
   background: var(--primary-soft);
   color: var(--primary);
 }
 
 .stat strong {
-  font-size: 20px;
-  font-weight: 700;
+  font-size: 16px;
+  font-weight: 600;
   line-height: 1;
   font-variant-numeric: tabular-nums;
 }
@@ -423,8 +441,8 @@ select:hover {
 .workspace {
   display: grid;
   flex: 1;
-  grid-template-columns: 320px minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 8px;
   min-height: 0;
 }
 
@@ -434,7 +452,7 @@ select:hover {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow);
@@ -448,8 +466,8 @@ select:hover {
 
 .create {
   display: flex;
-  gap: 8px;
-  padding: 10px 10px 8px;
+  gap: 6px;
+  padding: 8px 8px 6px;
 }
 
 .create select {
@@ -459,7 +477,7 @@ select:hover {
 
 .search {
   position: relative;
-  margin: 0 10px 8px;
+  margin: 0 8px 8px;
   color: var(--muted);
 }
 
@@ -475,8 +493,9 @@ select:hover {
 
 .search input {
   padding-left: 30px;
-  background: var(--surface-2);
+  background: var(--pill);
   color: var(--text);
+  border-color: transparent;
 }
 
 .box {
@@ -485,8 +504,8 @@ select:hover {
   align-items: center;
   gap: 2px 8px;
   width: 100%;
-  min-height: calc(var(--control) + 4px);
-  padding: 6px 10px 6px 12px;
+  min-height: 0;
+  padding: 6px 10px 6px 9px;
   border: 0;
   border-left: 3px solid transparent;
   background: none;
@@ -500,7 +519,7 @@ select:hover {
 
 .box.active {
   border-left-color: var(--primary);
-  background: var(--primary-soft);
+  background: var(--selected);
 }
 
 .box.single {
@@ -535,7 +554,7 @@ select:hover {
   padding: 0 6px;
   overflow: hidden;
   border-radius: 4px;
-  background: var(--border);
+  background: var(--pill);
   color: var(--text-2);
   font-size: 11px;
   line-height: 18px;
@@ -561,9 +580,9 @@ select:hover {
   display: flex;
   align-items: center;
   gap: 4px;
-  min-height: 44px;
-  padding: 0 8px 0 14px;
-  border-bottom: 1px solid var(--border);
+  min-height: 36px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--border-2);
 }
 
 .panel-head h2 {
@@ -586,7 +605,7 @@ select:hover {
 /* mails */
 
 .mail + .mail {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-2);
 }
 
 .mail.open {
@@ -602,8 +621,8 @@ select:hover {
 
 .code {
   flex: none;
-  width: 104px;
-  height: 28px;
+  width: 86px;
+  height: 26px;
   padding: 0 6px;
   overflow: hidden;
   border: 1px solid transparent;
@@ -611,9 +630,9 @@ select:hover {
   background: var(--primary-soft);
   color: var(--primary);
   font-family: var(--mono);
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0;
   text-align: center;
   text-overflow: ellipsis;
   transition: background-color 0.15s ease, color 0.15s ease;
@@ -631,7 +650,7 @@ button.code:hover {
   font-size: 12px;
   font-weight: 400;
   letter-spacing: 0;
-  line-height: 28px;
+  line-height: 26px;
 }
 
 .mail-main {
@@ -642,7 +661,7 @@ button.code:hover {
   align-items: center;
   gap: 0 10px;
   min-width: 0;
-  padding: 7px 12px 7px 8px;
+  padding: 5px 10px 5px 8px;
   border: 0;
   background: none;
   text-align: left;
@@ -662,7 +681,7 @@ button.code:hover {
 
 .subject {
   grid-area: subject;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .mail.read .subject {
@@ -711,9 +730,9 @@ button.code:hover {
   margin: 0 12px 10px;
   padding: 10px 12px;
   overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
+  border: 0;
+  border-radius: 6px;
+  background: var(--pill);
   color: var(--text-2);
   font-family: var(--mono);
   font-size: 12px;
@@ -759,6 +778,7 @@ button.code:hover {
   pointer-events: none;
   transform: translate(-50%, 8px);
   transition: opacity 0.2s ease, transform 0.2s ease;
+  box-shadow: var(--shadow-float);
 }
 
 .toast.show {
@@ -776,8 +796,8 @@ button.code:hover {
 .manage {
   display: grid;
   flex: 1;
-  grid-template-columns: minmax(0, 1fr) 360px;
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 8px;
   align-items: start;
   min-height: 0;
 }
@@ -798,9 +818,9 @@ button.code:hover {
 
 .table th,
 .table td {
-  height: 40px;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--border);
+  height: 34px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border-2);
   text-align: left;
   white-space: nowrap;
 }
@@ -808,10 +828,10 @@ button.code:hover {
 .table th {
   position: sticky;
   top: 0;
-  background: var(--surface-2);
+  background: var(--surface);
   color: var(--muted);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .table tbody tr:last-child td {
@@ -823,11 +843,11 @@ button.code:hover {
 }
 
 .table tbody tr.active {
-  background: var(--primary-soft);
+  background: var(--selected);
 }
 
 .table .strong {
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .table .num {
@@ -836,8 +856,9 @@ button.code:hover {
 }
 
 .table .time {
-  color: var(--text-2);
+  color: var(--muted);
   font-variant-numeric: tabular-nums;
+  font-size: 12px;
 }
 
 .table .actions {
@@ -864,13 +885,14 @@ code {
 
 .form-body {
   display: grid;
-  gap: 12px;
-  padding: 14px;
+  gap: 10px;
+  padding: 12px;
   overflow-y: auto;
 }
 
 .field {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 4px;
   min-width: 0;
 }
@@ -879,7 +901,7 @@ code {
 .field > .label {
   color: var(--text-2);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .hint {
@@ -894,15 +916,15 @@ code {
 .hint code {
   padding: 0 4px;
   border-radius: 4px;
-  background: var(--border);
+  background: var(--pill);
   color: var(--text);
 }
 
 textarea {
   width: 100%;
-  padding: 8px 10px;
+  padding: 6px 8px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 6px;
   background: var(--surface);
   color: inherit;
   font-family: var(--mono);
@@ -929,7 +951,7 @@ input:disabled {
   gap: 2px;
   padding: 2px;
   border-radius: 8px;
-  background: var(--border);
+  background: var(--pill);
 }
 
 .segmented label {
@@ -946,7 +968,8 @@ input:disabled {
 .segmented label.active {
   background: var(--surface);
   color: var(--text);
-  font-weight: 600;
+  font-weight: 500;
+  box-shadow: 0 0 0 0.5px var(--border), 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
 .segmented label:focus-within {
@@ -966,10 +989,10 @@ input:disabled {
   justify-content: space-between;
   gap: 8px;
   min-height: var(--control);
-  padding: 4px 10px;
-  border: 1px dashed var(--border);
-  border-radius: 7px;
-  background: var(--surface-2);
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--pill);
   color: var(--muted);
   text-align: left;
 }
@@ -1027,7 +1050,7 @@ input:disabled {
 .notice code {
   padding: 0 4px;
   border-radius: 4px;
-  background: var(--border);
+  background: var(--pill);
 }
 
 .addr {
@@ -1083,7 +1106,7 @@ fieldset.field > legend {
   margin-bottom: 4px;
   color: var(--text-2);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .checks {
@@ -1091,7 +1114,7 @@ fieldset.field > legend {
   max-height: 168px;
   overflow-y: auto;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 6px;
 }
 
 .check {
@@ -1104,7 +1127,7 @@ fieldset.field > legend {
 }
 
 .check + .check {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-2);
 }
 
 .check:hover {
@@ -1124,18 +1147,18 @@ fieldset.field > legend {
 
 .switch {
   position: relative;
-  width: 32px;
+  width: 30px;
   height: 18px;
   padding: 0;
   border: 0;
   border-radius: 999px;
-  background: var(--muted);
+  background: color-mix(in srgb, var(--muted) 55%, transparent);
   vertical-align: middle;
   transition: background-color 0.15s ease;
 }
 
 .switch[aria-checked='true'] {
-  background: var(--success);
+  background: var(--primary);
 }
 
 .switch .knob {
@@ -1147,10 +1170,11 @@ fieldset.field > legend {
   border-radius: 50%;
   background: #fff;
   transition: transform 0.15s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
 .switch[aria-checked='true'] .knob {
-  transform: translateX(14px);
+  transform: translateX(12px);
 }
 
 .switch-label {
@@ -1180,7 +1204,7 @@ fieldset.field > legend {
   display: grid;
   gap: 6px;
   padding: 10px 12px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-2);
   background: var(--surface-2);
   font-size: 12px;
 }
