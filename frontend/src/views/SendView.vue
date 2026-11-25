@@ -3,9 +3,7 @@ import { onMounted, reactive, ref, watch } from 'vue'
 import { api, type Domain, type SentMail } from '../api'
 import Icon from '../Icon.vue'
 import Pager from '../Pager.vue'
-import { fail, formatTime, notify } from '../ui'
-
-const PAGE_SIZE = 50
+import { fail, formatTime, notify, pageSize } from '../ui'
 
 const domains = ref<Domain[]>([])
 const mails = ref<SentMail[]>([])
@@ -18,7 +16,7 @@ const form = reactive({ local: '', domain: '', from_name: '', to: '', subject: '
 
 async function loadSent() {
   try {
-    const result = await api.sent(PAGE_SIZE, (page.value - 1) * PAGE_SIZE)
+    const result = await api.sent(pageSize.value, (page.value - 1) * pageSize.value)
     configured.value = result.configured
     mails.value = result.mails
     total.value = result.total
@@ -51,6 +49,10 @@ async function send() {
 watch(page, () => {
   expanded.value = null
   loadSent()
+})
+watch(pageSize, () => {
+  if (page.value === 1) loadSent()
+  else page.value = 1
 })
 
 onMounted(async () => {
@@ -123,7 +125,7 @@ onMounted(async () => {
           <p>还没有发件记录</p>
         </div>
       </div>
-      <Pager v-model:page="page" :size="PAGE_SIZE" :total="total" />
+      <Pager v-model:page="page" :total="total" />
     </section>
 
     <form class="panel form" @submit.prevent="send">

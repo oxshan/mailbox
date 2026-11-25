@@ -3,10 +3,9 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api, type Domain, type Mail, type Mailbox, type Scenario, type Source, type Stats } from '../api'
 import Icon from '../Icon.vue'
 import Pager from '../Pager.vue'
-import { copy, fail, formatTime } from '../ui'
+import { copy, fail, formatTime, pageSize } from '../ui'
 
 const REFRESH_MS = 5000
-const PAGE_SIZE = 50
 const SEARCH_DELAY_MS = 250
 
 const stats = ref<Stats | null>(null)
@@ -57,7 +56,7 @@ const statCards = computed(() => [
   { icon: 'shield', label: '验证码', value: stats.value?.codes },
 ] as const)
 
-const lastPage = (total: number) => Math.max(1, Math.ceil(total / PAGE_SIZE))
+const lastPage = (total: number) => Math.max(1, Math.ceil(total / pageSize.value))
 
 async function refresh() {
   const request = ++latest
@@ -65,8 +64,8 @@ async function refresh() {
   try {
     const [nextStats, nextBoxes, nextMails] = await Promise.all([
       api.stats(),
-      api.mailboxes(keyword.value, PAGE_SIZE, (boxPage.value - 1) * PAGE_SIZE),
-      api.mails(selected.value, PAGE_SIZE, (mailPage.value - 1) * PAGE_SIZE),
+      api.mailboxes(keyword.value, pageSize.value, (boxPage.value - 1) * pageSize.value),
+      api.mails(selected.value, pageSize.value, (mailPage.value - 1) * pageSize.value),
     ])
     if (request !== latest) return
     stats.value = nextStats
@@ -133,6 +132,10 @@ watch(selected, () => {
 })
 watch(mailPage, () => (expanded.value = null))
 watch([boxPage, mailPage], refresh)
+watch(pageSize, () => {
+  boxPage.value = mailPage.value = 1
+  refresh()
+})
 watch(filter, (text) => {
   window.clearTimeout(searchTimer)
   searchTimer = window.setTimeout(() => {
@@ -234,7 +237,7 @@ onBeforeUnmount(() => {
           {{ keyword ? '没有匹配的邮箱' : '还没有邮箱，点上方按钮生成' }}
         </li>
       </ul>
-      <Pager v-model:page="boxPage" :size="PAGE_SIZE" :total="boxTotal" />
+      <Pager v-model:page="boxPage" :total="boxTotal" />
     </aside>
 
     <section class="panel" aria-label="邮件列表">
@@ -310,7 +313,7 @@ onBeforeUnmount(() => {
         <p>暂无邮件</p>
         <p v-if="selected">向 <span class="mono">{{ selected }}</span> 发信后会自动出现在这里</p>
       </div>
-      <Pager v-model:page="mailPage" :size="PAGE_SIZE" :total="mailTotal" />
+      <Pager v-model:page="mailPage" :total="mailTotal" />
     </section>
   </div>
 </template>

@@ -1,4 +1,4 @@
-import { reactive } from 'vue'
+import { reactive, ref, watch } from 'vue'
 import { clearKey, getKey, UnauthorizedError } from './api'
 
 export const ui = reactive({
@@ -7,6 +7,14 @@ export const ui = reactive({
   toast: '',
   toastKind: 'ok' as 'ok' | 'error',
 })
+
+export const PAGE_SIZES = [20, 50, 100]
+const SIZE_STORAGE = 'mailbox_page_size'
+const savedSize = Number(localStorage.getItem(SIZE_STORAGE))
+
+// One choice for every list, remembered across visits.
+export const pageSize = ref(PAGE_SIZES.includes(savedSize) ? savedSize : 50)
+watch(pageSize, (size) => localStorage.setItem(SIZE_STORAGE, String(size)))
 
 let toastTimer: number | undefined
 

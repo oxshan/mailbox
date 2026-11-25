@@ -606,14 +606,23 @@ select:hover {
   display: flex;
   flex: none;
   align-items: center;
+  flex-wrap: wrap;
   justify-content: center;
-  gap: 6px;
+  gap: 4px;
   padding: 2px 8px;
   border-top: 1px solid var(--border-2);
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.pager select {
+  width: auto;
+  height: 24px;
+  margin-left: 4px;
+  padding: 0 4px;
+  font-size: 12px;
 }
 
 .pager .prev .icon {
