@@ -11,6 +11,7 @@ from email.utils import parseaddr
 from http.server import ThreadingHTTPServer
 
 import accounts
+import trust
 from api import ApiHandler
 from config import Config
 from extract import _EMAIL, extract_for, parse_mail
@@ -51,14 +52,21 @@ class MailApp:
             handle.write(key)
         return key
 
-    def ingest(self, recipient, mail, received_at=None):
+    def ingest(self, recipient, mail, received_at=None, peer=None):
         """Store a mail under the address it reached us at, or under the alias it was forwarded from.
 
+        `peer` is the IP address of the server that delivered it over SMTP, None for mail read from an account.
+        A mail at a collector address is only filed under an alias when the source's service handed it on.
         Returns False when the mailbox is disabled and the mail was dropped.
         """
         store = self.store
         source = store.collectors().get(recipient)
-        alias = store.resolve_alias(source, mail["recipients"], mail["mentions"]) if source else None
+        trusted = source is not None and trust.from_forwarder(source, mail, peer)
+        if source is not None and not trusted:
+            how = "read from the account" if peer is None else "delivered by %s" % (peer or "an unknown peer")
+            print("collector %s: mail %s did not come from %s; kept under the collector" % (
+                recipient, how, source["kind"]), flush=True)
+        alias = store.resolve_alias(source, mail["recipients"], mail["mentions"]) if trusted else None
         address = alias or recipient
         if store.is_disabled(address):
             return False
@@ -66,11 +74,11 @@ class MailApp:
         store.add_mail(address, mail, code, source["id"] if alias else None, received_at)
         return True
 
-    def deliver(self, sender, recipients, raw):
-        """Take in a mail received over SMTP, then forward a copy of it."""
+    def deliver(self, sender, recipients, raw, peer=""):
+        """Take in a mail received over SMTP from `peer`, then forward a copy of it."""
         mail = parse_mail(raw)
         mail["sender"] = mail["sender"] or sender
-        accepted = [recipient for recipient in recipients if self.ingest(recipient, mail)]
+        accepted = [recipient for recipient in recipients if self.ingest(recipient, mail, peer=peer or "")]
         try:
             self.forward(
                 mail["sender"], accepted, mail["subject"], mail["plain"] or mail["rich"], mail["markup"],

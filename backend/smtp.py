@@ -64,7 +64,8 @@ class SmtpSession:
                 else:
                     loop = asyncio.get_event_loop()
                     try:
-                        await loop.run_in_executor(None, self.app.deliver, sender, list(recipients), raw)
+                        peer = (self.writer.get_extra_info("peername") or ("",))[0]
+                        await loop.run_in_executor(None, self.app.deliver, sender, list(recipients), raw, peer)
                     except Exception as exc:
                         print("deliver failed: %r" % exc, flush=True)
                         await self.reply("451 Local error, try again later")

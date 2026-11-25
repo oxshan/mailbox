@@ -20,6 +20,8 @@ from sources import SourceError
 from store import DEFAULT_SCENARIO
 
 MAX_FORWARDS = 20
+# Largest request body: enough to import a few thousand accounts at once.
+MAX_REQUEST_BYTES = 4 * 1024 * 1024
 # An external service (Resend, addy.io, Duck) refused or could not be reached. Not 502 or 504:
 # a proxy such as Cloudflare replaces those responses with its own error page.
 UPSTREAM_FAILED = 424
@@ -79,12 +81,22 @@ class ApiHandler(BaseHTTPRequestHandler):
     def route(self):
         url = urlparse(self.path)
         params = {k: v[0] for k, v in parse_qs(url.query).items()}
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length) if length else b""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        # The body is read only for an authorized request of an accepted size. A body left unread would be
+        # taken for the next request on the connection, so the connection is closed instead.
         if not url.path.startswith("/api/"):
+            self.close_connection = self.close_connection or length != 0
             return self.serve_static(url.path)
         if not self.authorized():
+            self.close_connection = self.close_connection or length != 0
             return self.send_json(401, {"error": "invalid api key"})
+        if length < 0 or length > MAX_REQUEST_BYTES:
+            self.close_connection = True
+            return self.send_json(413, {"error": "请求体长度无效或超过 %d MB" % (MAX_REQUEST_BYTES // 1024 // 1024)})
+        raw = self.rfile.read(length) if length else b""
         parts = [unquote(part) for part in url.path[5:].strip("/").split("/")]
         handler = getattr(self, "%s_%s" % (self.command.lower(), parts[0]), None) or getattr(
             self, "api_" + parts[0], None

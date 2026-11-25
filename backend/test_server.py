@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, quote, urlencode
 
 import accounts
 import mxcheck
+import trust
 from config import Config
 from extract import compile_template, extract_code, extract_with_template, html_to_text, parse_mail
 from mxcheck import parse_mx_response
@@ -545,13 +546,22 @@ class EndToEndTest(unittest.TestCase):
         store.execute("DELETE FROM sources")
         store.execute("DELETE FROM scenario_sources")
 
-    def relay(self, collector, to, subject, body, sender="Example <noreply@example.com>"):
-        """Deliver a mail the way a forwarding service does: addressed to an alias, handed to the collector."""
+    FORWARDER_HOSTS = {"addy": "mail2.anonaddy.me", "duck": "mx1.duck.com"}
+
+    def relay(self, collector, to, subject, body, sender="Example <noreply@example.com>", via=None):
+        """Deliver a mail the way a forwarding service does: addressed to an alias, handed to the collector.
+
+        The delivering server's host name is taken to be the source's forwarder unless `via` names another.
+        """
         msg = EmailMessage()
         msg["From"], msg["To"], msg["Subject"] = sender, to, subject
         msg.set_content(body)
-        with smtplib.SMTP("127.0.0.1", self.app.smtp_port, timeout=10) as client:
-            client.sendmail("bounce@forwarder.example", [collector], msg.as_bytes())
+        if via is None:
+            kind = self.app.store.collectors()[collector]["kind"]
+            via = self.FORWARDER_HOSTS[kind]
+        with mock.patch.object(trust, "confirmed_host", return_value=via):
+            with smtplib.SMTP("127.0.0.1", self.app.smtp_port, timeout=10) as client:
+                client.sendmail("bounce@forwarder.example", [collector], msg.as_bytes())
 
     def boxes(self, query=""):
         return {b["address"]: b for b in self.api("/api/mailboxes?limit=500" + query)["mailboxes"]}
@@ -1028,9 +1038,27 @@ class EndToEndTest(unittest.TestCase):
             )["id"]
             self.assertIn("已接入的邮箱账号", self.api_error("/api/sources", method="POST", body={"kind": "duck", "name": "x", "token": "t", "collector": "other@outlook.com"})[1])
             store.add_mailbox("calm-owl@duck.com", store.default_scenario_id, source)
-            state["inbox"].append(self.graph_message("m6", "Via alias", "Your verification code is 410006", to="Calm-Owl@duck.com", received="2026-11-25T09:02:00Z"))
+            def stamped(message, verdict):
+                message["internetMessageHeaders"].insert(0, {"name": "Authentication-Results", "value": verdict})
+                return message
+
+            forged = self.graph_message("m5f", "Forged", "Your verification code is 666666", to="Calm-Owl@duck.com", received="2026-11-25T09:01:30Z")
+            forged["internetMessageHeaders"].append({"name": "Authentication-Results", "value": "mx.microsoft.com 1; dkim=pass header.d=duck.com"})
+            state["inbox"].append(stamped(forged, "mx.microsoft.com 1; spf=pass smtp.mailfrom=evil.example; dkim=none"))
+            state["inbox"].append(stamped(
+                self.graph_message("m5g", "Fake receiver", "Your verification code is 666667", to="Calm-Owl@duck.com", received="2026-11-25T09:01:40Z"),
+                "mx.evil.example; spf=pass smtp.mailfrom=duck.com; dkim=pass header.d=duck.com",
+            ))
+            state["inbox"].append(stamped(
+                self.graph_message("m6", "Via alias", "Your verification code is 410006", to="Calm-Owl@duck.com", received="2026-11-25T09:02:00Z"),
+                "mx.microsoft.com 1; spf=pass (sender IP is 1.2.3.4) smtp.mailfrom=bounce.duck.com; dkim=pass (signature was verified) header.d=duck.com;dmarc=pass",
+            ))
             store.execute("UPDATE accounts SET synced_at = synced_at - 60 WHERE id = ?", (me["id"],))
             self.assertEqual(self.code("calm-owl@duck.com")["verify_code"], "410006")
+            kept = [m["subject"] for m in self.api("/api/mails?address=me@outlook.com")["mails"]]
+            self.assertIn("Forged", kept)
+            self.assertIn("Fake receiver", kept)
+            self.assertEqual([m["subject"] for m in self.api("/api/mails?address=calm-owl@duck.com")["mails"]], ["Via alias"])
             self.assertEqual(self.boxes()["calm-owl@duck.com"]["source_kind"], "duck")
             self.assertNotIn("Via alias", [m["subject"] for m in self.api("/api/mails?address=me@outlook.com")["mails"]])
 
@@ -1073,6 +1101,79 @@ class EndToEndTest(unittest.TestCase):
                 store.execute("DELETE FROM %s" % table)
             store.execute("DELETE FROM mailboxes WHERE account_id IS NOT NULL OR source_id IS NOT NULL")
             store.execute("DELETE FROM mails WHERE address LIKE '%@outlook.com' OR address LIKE '%@duck.com'")
+
+    def test_collector_mail_must_come_from_forwarder(self):
+        fake, _ = self.fake_sources()
+        collector = "collect-spoof@a.test"
+        try:
+            source = self.api(
+                "/api/sources",
+                method="POST",
+                body={"kind": "duck", "name": "Duck", "token": "duck_good_token_456", "collector": collector},
+            )["id"]
+            box = self.new_box(source=source)
+            for via in ("", "mail.evil.example", "duck.com.evil.example"):
+                self.relay(collector, box["address"], "Fake", "Your verification code is 999999", via=via)
+                self.relay(collector, "invented@duck.com", "Fake", "Your verification code is 999998", via=via)
+            self.assertIsNone(self.code(box["address"])["verify_code"])
+            self.assertNotIn("invented@duck.com", self.boxes())
+            self.assertEqual(self.boxes()[collector]["mail_count"], 6)
+            self.relay(collector, box["address"], "Real", "Your verification code is 777777", via="out-1.mx.duck.com")
+            self.assertEqual(self.code(box["address"])["verify_code"], "777777")
+        finally:
+            self.close_sources(fake)
+
+    def test_forwarder_checks(self):
+        source = {"kind": "addy", "alias_domain": ""}
+        real = "Authentication-Results: mx.microsoft.com 1; spf=pass (sender IP is 185.70.196.149) smtp.mailfrom=anonaddy.me; dkim=pass (signature was verified) header.d=anonaddy.me;dmarc=pass"
+        self.assertEqual(trust.receiver_verdict("Received: x\n" + real), {"anonaddy.me"})
+        self.assertTrue(trust.from_forwarder(source, {"headers": real}, None))
+        self.assertFalse(trust.from_forwarder(source, {"headers": real.replace("dkim=pass", "dkim=fail").replace("spf=pass", "spf=softfail")}, None))
+        self.assertFalse(trust.from_forwarder(source, {"headers": real.replace("smtp.mailfrom=anonaddy.me", "smtp.mailfrom=x@anonaddy.me.evil.example").replace("header.d=anonaddy.me", "header.d=evil.example")}, None))
+        self.assertFalse(trust.from_forwarder(source, {"headers": real.replace("mx.microsoft.com", "mx.evil.example")}, None))
+        self.assertFalse(trust.from_forwarder(source, {"headers": "Authentication-Results: mx.microsoft.com 1; spf=pass header.d=anonaddy.me"}, None))
+        self.assertFalse(trust.from_forwarder(source, {"headers": ""}, None))
+        self.assertTrue(trust.from_forwarder(dict(source, alias_domain="mine.example"), {"headers": real.replace("anonaddy.me", "mine.example")}, None))
+        with mock.patch.object(trust, "confirmed_host", return_value="mail2.anonaddy.me"):
+            self.assertTrue(trust.from_forwarder(source, {"headers": ""}, "185.70.196.149"))
+            self.assertFalse(trust.from_forwarder(source, {"headers": real}, ""))
+        with mock.patch.object(trust.socket, "gethostbyaddr", return_value=("mail2.anonaddy.me", [], [])):
+            with mock.patch.object(trust.socket, "getaddrinfo", return_value=[(2, 1, 6, "", ("10.0.0.9", 0))]):
+                self.assertEqual(trust.confirmed_host("185.70.196.149"), "")
+
+    def test_request_body_limits(self):
+        import http.client
+
+        def raw(path, headers, body=b""):
+            connection = http.client.HTTPConnection("127.0.0.1", self.app.http_port, timeout=10)
+            connection.putrequest("POST", path)
+            for name, value in headers.items():
+                connection.putheader(name, value)
+            connection.endheaders()
+            if body:
+                connection.send(body)
+            response = connection.getresponse()
+            result = response.status, response.getheader("Connection"), json.loads(response.read() or b"{}")
+            connection.close()
+            return result
+
+        started = time.time()
+        status, _, body = raw("/api/mailboxes", {"Content-Length": str(10 * 1024 ** 3), "X-API-Key": "wrong"})
+        self.assertEqual((status, body["msg"]), (401, "invalid api key"))
+        self.assertLess(time.time() - started, 5)
+        status, _, body = raw("/api/mailboxes", {"Content-Length": str(5 * 1024 * 1024), "X-API-Key": "secret"})
+        self.assertEqual(status, 413)
+        self.assertEqual(raw("/api/mailboxes", {"Content-Length": "abc", "X-API-Key": "secret"})[0], 413)
+        payload = json.dumps({"scenario": "default"}).encode()
+        status, _, body = raw("/api/mailboxes", {"Content-Length": str(len(payload)), "X-API-Key": "secret", "Content-Type": "application/json"}, payload)
+        self.assertEqual((status, body["code"]), (200, 0))
+
+    def test_hostile_html_is_fast(self):
+        for markup in ("<script " * 300000, "<a" * 1000000, "\r" * 2000000 + "x", "<style <head <" * 100000):
+            started = time.time()
+            html_to_text(markup)
+            self.assertLess(time.time() - started, 3)
+        self.assertEqual(html_to_text("<script>x</script>A<br>B<STYLE>y</style >C<p>  D  </p>"), "A\nB C D")
 
     def test_requires_api_key(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:

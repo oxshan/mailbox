@@ -72,13 +72,42 @@ def extract_for(template, subject, plain, rich):
     return extract_code(subject, plain) or extract_code(subject, rich)
 
 
-def html_to_text(markup):
-    markup = re.sub(r"(?is)<(script|style|head)\b.*?</\1>", " ", markup)
-    markup = re.sub(r"(?i)<br\s*/?>|</(p|div|tr|h\d|li)>", "\n", markup)
-    text = html.unescape(re.sub(r"(?s)<[^>]+>", " ", markup))
-    text = re.sub(r"[ \t\xa0]+", " ", text)
-    return re.sub(r"\s*\n\s*", "\n", text).strip()
+_BLOCK_OPEN = re.compile(r"<(script|style|head)\b", re.I)
 
+
+def _drop_blocks(markup):
+    """Remove <script>, <style> and <head> elements with their content.
+
+    Done by scanning rather than with one backtracking regex: mail is untrusted, and many unclosed opening
+    tags would make such a regex rescan the rest of the message for each one.
+    """
+    lower, parts, pos, unclosed = markup.lower(), [], 0, set()
+    while True:
+        match = _BLOCK_OPEN.search(markup, pos)
+        if not match:
+            break
+        name = match.group(1).lower()
+        end = -1 if name in unclosed else lower.find("</" + name, match.end())
+        if end < 0:
+            # Nothing closes it from here on, and nothing will for a later tag of the same name either.
+            unclosed.add(name)
+            parts.append(markup[pos : match.end()])
+            pos = match.end()
+            continue
+        parts.append(markup[pos : match.start()] + " ")
+        close = markup.find(">", end)
+        pos = len(markup) if close < 0 else close + 1
+    parts.append(markup[pos:])
+    return "".join(parts)
+
+
+def html_to_text(markup):
+    """The readable text of an HTML body. Every step is linear in the length of the mail."""
+    markup = re.sub(r"(?i)<br\s*/?>|</(p|div|tr|h\d|li)>", "\n", _drop_blocks(markup))
+    # [^<>] instead of [^>]: a "<" never ends a tag, so a run of stray "<" cannot make each one rescan to the end.
+    text = html.unescape(re.sub(r"<[^<>]*>", " ", markup))
+    lines = (re.sub(r"[ \t\xa0]+", " ", line).strip() for line in text.split("\n"))
+    return "\n".join(line for line in lines if line)
 
 
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
